@@ -1,5 +1,6 @@
 import type { NextAuthOptions } from 'next-auth'
 import GoogleProvider from 'next-auth/providers/google'
+import { isEmailAllowed } from '@/lib/security'
 
 // Pure JWT auth — no DB adapter required.
 // Users are verified via allowedEmails; session is a signed cookie.
@@ -14,13 +15,7 @@ export const authOptions: NextAuthOptions = {
   ],
   callbacks: {
     async signIn({ user }) {
-      // Comma-separated allowlist from env, e.g. ALLOWED_EMAILS="you@example.com,teammate@example.com"
-      const allowedEmails = (process.env.ALLOWED_EMAILS ?? '')
-        .split(',')
-        .map((e) => e.trim().toLowerCase())
-        .filter(Boolean)
-      if (allowedEmails.length === 0) return false // lock down by default until configured
-      return allowedEmails.includes((user.email ?? '').toLowerCase())
+      return isEmailAllowed(user.email)
     },
     async jwt({ token, user }) {
       if (user) {

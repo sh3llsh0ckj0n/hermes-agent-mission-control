@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { hasValidBearerSecret } from "@/lib/security";
 
 function isAuthorized(request: Request) {
   const secret = process.env.CLIENT_PULSE_ADMIN_SECRET || process.env.CRON_SECRET;
-  if (!secret) return true;
-  return request.headers.get("authorization") === `Bearer ${secret}`;
+  return hasValidBearerSecret(request.headers, secret);
 }
 
 export async function POST(request: Request) {

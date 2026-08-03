@@ -1,11 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getToken } from 'next-auth/jwt';
+import { hasValidInternalSecret } from '@/lib/security';
 
-// Shared garden blob — same source as Marwa's dashboard (source of truth)
-const GARDEN_BLOB = 'https://jsonblob.com/api/jsonBlob/019cce3a-7bc9-7e88-9e8f-fe461957b1aa';
+function gardenBlobUrl(): string | null {
+  return process.env.GARDEN_BLOB_URL?.trim() || null;
+}
 
 export async function GET() {
+  const blobUrl = gardenBlobUrl();
+  if (!blobUrl) {
+    return NextResponse.json({ error: 'Garden integration is not configured' }, { status: 503 });
+  }
+
   try {
-    const res = await fetch(GARDEN_BLOB, {
+    const res = await fetch(blobUrl, {
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
       cache: 'no-store',
     });
@@ -19,9 +27,21 @@ export async function GET() {
 }
 
 export async function PUT(req: NextRequest) {
+  const hasSession = process.env.NEXTAUTH_SECRET
+    ? Boolean(await getToken({ req, secret: process.env.NEXTAUTH_SECRET }).catch(() => null))
+    : false;
+  if (!hasValidInternalSecret(req.headers) && !hasSession) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const blobUrl = gardenBlobUrl();
+  if (!blobUrl) {
+    return NextResponse.json({ error: 'Garden integration is not configured' }, { status: 503 });
+  }
+
   try {
     const body = await req.json();
-    const res = await fetch(GARDEN_BLOB, {
+    const res = await fetch(blobUrl, {
       method: 'PUT',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

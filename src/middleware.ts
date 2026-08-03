@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getToken } from 'next-auth/jwt';
+import { hasValidInternalSecret } from '@/lib/security';
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -10,10 +11,10 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Skip auth for NextAuth routes, assets, login, and public embeddable charts
+  // Skip auth for NextAuth routes, assets, login, and read-only garden access.
   if (
     pathname.startsWith('/api/auth/') ||
-    pathname.startsWith('/api/garden') ||
+    (pathname.startsWith('/api/garden') && ['GET', 'HEAD'].includes(request.method)) ||
     pathname.startsWith('/_next/') ||
     pathname.startsWith('/favicon.ico') ||
     pathname === '/login'
@@ -22,8 +23,7 @@ export async function middleware(request: NextRequest) {
   }
 
   // Allow internal agent calls with shared secret
-  const internalSecret = request.headers.get('x-internal-secret');
-  if (internalSecret && internalSecret === process.env.INTERNAL_API_SECRET) {
+  if (hasValidInternalSecret(request.headers)) {
     return NextResponse.next();
   }
 

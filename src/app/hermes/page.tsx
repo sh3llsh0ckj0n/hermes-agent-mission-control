@@ -185,7 +185,6 @@ function HealthChip({ health }: { health: Health | null }) {
 // ── Dispatch bar ──────────────────────────────────────────
 function DispatchBar({ onDone }: { onDone: () => void }) {
   const [text, setText] = useState("");
-  const [side, setSide] = useState(false);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -205,12 +204,13 @@ function DispatchBar({ onDone }: { onDone: () => void }) {
       const r = await fetch("/api/hermes/dispatch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind: "oneshot", title, sideEffecting: side }),
+        body: JSON.stringify({ kind: "oneshot", title }),
       });
       if (r.ok) {
+        const data = (await r.json()) as { request?: { status?: string } };
         setText("");
         flash(
-          side
+          data.request?.status === "awaiting_approval"
             ? "Sent to approval inbox — awaiting your go-ahead."
             : "Queued for Hermes."
         );
@@ -238,30 +238,9 @@ function DispatchBar({ onDone }: { onDone: () => void }) {
           className="flex-1 min-w-0 bg-transparent text-[14px] text-[var(--text)] placeholder:text-[var(--text-3)] px-3.5 py-2.5 rounded-[10px] border border-[var(--line)] focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)] outline-none transition-colors"
         />
         <div className="flex items-center gap-3 shrink-0">
-          <button
-            type="button"
-            onClick={() => setSide((s) => !s)}
-            aria-pressed={side}
-            className="flex items-center gap-2 select-none"
-          >
-            <span
-              className="relative inline-flex h-[18px] w-[32px] rounded-full transition-colors"
-              style={{
-                background: side
-                  ? "color-mix(in srgb, var(--warn) 55%, transparent)"
-                  : "var(--surface-2)",
-                border: "1px solid var(--line)",
-              }}
-            >
-              <span
-                className="absolute top-[1px] h-[14px] w-[14px] rounded-full bg-[var(--text)] transition-all"
-                style={{ left: side ? "15px" : "1px" }}
-              />
-            </span>
-            <span className="text-[12px] font-medium text-[var(--text-2)]">
-              side-effecting?
-            </span>
-          </button>
+          <span className="text-[11.5px] text-[var(--text-3)]">
+            Risk is assigned by the server
+          </span>
           <Button variant="primary" onClick={submit} disabled={busy || !text.trim()}>
             <Send className="w-3.5 h-3.5" />
             Dispatch

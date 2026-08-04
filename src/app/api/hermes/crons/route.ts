@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { buildHermesRequestData } from "@/lib/hermes-request";
 import { withHermesServiceUnavailable } from "@/lib/hermes-service";
 import { prisma } from "@/lib/prisma";
 
@@ -68,16 +69,12 @@ export async function POST(req: Request) {
     if (!["create", "pause", "resume", "run", "remove", "edit"].includes(op))
       return NextResponse.json({ error: "bad op" }, { status: 400 });
     const label = op === "create" ? `Schedule: ${b.schedule || "?"} — ${b.prompt || b.name || ""}` : `Cron ${op}: ${b.name || b.id || ""}`;
-    const sideEffecting = op === "create" || op === "edit" || op === "remove";
     const row = await prisma.agentRequest.create({
-      data: {
-        origin: "web",
+      data: buildHermesRequestData({
         kind: `cron.${op}`,
         title: label.slice(0, 200),
         prompt: JSON.stringify(b),
-        sideEffecting,
-        status: sideEffecting ? "awaiting_approval" : "queued",
-      },
+      }),
     });
     return NextResponse.json({ request: row });
   });

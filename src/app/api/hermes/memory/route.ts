@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { buildHermesRequestData } from "@/lib/hermes-request";
 import { withHermesServiceUnavailable } from "@/lib/hermes-service";
 import { prisma } from "@/lib/prisma";
 
@@ -47,14 +48,11 @@ export async function POST(req: Request) {
       body: (b.body || "").toString(),
     };
     const row = await prisma.agentRequest.create({
-      data: {
-        origin: "web",
+      data: buildHermesRequestData({
         kind: "memory.write",
         title: `Memory: ${title}`.slice(0, 200),
         prompt: JSON.stringify(entry),
-        sideEffecting: false,
-        status: "queued",
-      },
+      }),
     });
     return NextResponse.json({ request: row, entry });
   });

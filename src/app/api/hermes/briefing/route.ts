@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { buildHermesRequestData } from "@/lib/hermes-request";
 import { withHermesServiceUnavailable } from "@/lib/hermes-service";
 import { prisma } from "@/lib/prisma";
 
@@ -13,14 +14,11 @@ export async function GET() {
 export async function POST() {
   return withHermesServiceUnavailable(async () => {
     const row = await prisma.agentRequest.create({
-      data: {
-        origin: "web",
+      data: buildHermesRequestData({
         kind: "briefing.generate",
         title: "Generate chief-of-staff brief",
         prompt: "now",
-        sideEffecting: false,
-        status: "queued",
-      },
+      }),
     });
     return NextResponse.json({ request: row });
   });

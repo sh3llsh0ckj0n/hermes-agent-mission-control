@@ -93,14 +93,11 @@ export function CommandPalette() {
   const close = useCallback(() => setOpen(false), []);
 
   const runDispatch = useCallback(async (q: string) => {
-    // Route anything that acts on the outside world to the Approval Inbox
-    // instead of running it immediately.
-    const sideEffecting = /\b(post|tweet|send|dm|message|reply|email|buy|purchase|order|pay|transfer|withdraw|deposit|trade|delete|remove|publish|schedule|book|cancel|unsubscribe)\b/i.test(q);
     try {
       await fetch("/api/hermes/dispatch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind: "oneshot", title: q, prompt: q, sideEffecting }),
+        body: JSON.stringify({ kind: "oneshot", title: q, prompt: q }),
       });
     } catch {
       /* non-blocking — dispatch is best-effort */

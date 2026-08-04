@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { withHermesServiceUnavailable } from "@/lib/hermes-service";
 import { prisma } from "@/lib/prisma";
 
 export type CronJob = {
@@ -51,29 +52,33 @@ function parseCrons(raw: string): CronJob[] {
 }
 
 export async function GET() {
-  const row = await prisma.dataStore.findUnique({ where: { key: "hermes-crons" } });
-  const data = (row?.data as { raw?: string; syncedAt?: string } | null) ?? {};
-  const jobs = data.raw ? parseCrons(data.raw) : [];
-  return NextResponse.json({ jobs, syncedAt: data.syncedAt ?? null });
+  return withHermesServiceUnavailable(async () => {
+    const row = await prisma.dataStore.findUnique({ where: { key: "hermes-crons" } });
+    const data = (row?.data as { raw?: string; syncedAt?: string } | null) ?? {};
+    const jobs = data.raw ? parseCrons(data.raw) : [];
+    return NextResponse.json({ jobs, syncedAt: data.syncedAt ?? null });
+  });
 }
 
 // POST { op: "create"|"pause"|"resume"|"run"|"remove"|"edit", ... } → queue a cron mutation for the bridge
 export async function POST(req: Request) {
-  const b = await req.json().catch(() => ({}));
-  const op = (b.op || "").toString();
-  if (!["create", "pause", "resume", "run", "remove", "edit"].includes(op))
-    return NextResponse.json({ error: "bad op" }, { status: 400 });
-  const label = op === "create" ? `Schedule: ${b.schedule || "?"} — ${b.prompt || b.name || ""}` : `Cron ${op}: ${b.name || b.id || ""}`;
-  const sideEffecting = op === "create" || op === "edit" || op === "remove";
-  const row = await prisma.agentRequest.create({
-    data: {
-      origin: "web",
-      kind: `cron.${op}`,
-      title: label.slice(0, 200),
-      prompt: JSON.stringify(b),
-      sideEffecting,
-      status: sideEffecting ? "awaiting_approval" : "queued",
-    },
+  return withHermesServiceUnavailable(async () => {
+    const b = await req.json().catch(() => ({}));
+    const op = (b.op || "").toString();
+    if (!["create", "pause", "resume", "run", "remove", "edit"].includes(op))
+      return NextResponse.json({ error: "bad op" }, { status: 400 });
+    const label = op === "create" ? `Schedule: ${b.schedule || "?"} — ${b.prompt || b.name || ""}` : `Cron ${op}: ${b.name || b.id || ""}`;
+    const sideEffecting = op === "create" || op === "edit" || op === "remove";
+    const row = await prisma.agentRequest.create({
+      data: {
+        origin: "web",
+        kind: `cron.${op}`,
+        title: label.slice(0, 200),
+        prompt: JSON.stringify(b),
+        sideEffecting,
+        status: sideEffecting ? "awaiting_approval" : "queued",
+      },
+    });
+    return NextResponse.json({ request: row });
   });
-  return NextResponse.json({ request: row });
 }

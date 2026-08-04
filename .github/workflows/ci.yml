@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Build-only placeholders. Port 1 prevents accidental PostgreSQL access.
+      DATABASE_URL: postgresql://ci_user:ci_password@127.0.0.1:1/hermes_ci
+      POSTGRES_URL: postgresql://ci_user:ci_password@127.0.0.1:1/hermes_ci
+      NEXTAUTH_URL: http://127.0.0.1:3000
+      NEXTAUTH_SECRET: ci-only-placeholder-not-a-secret
+      GOOGLE_CLIENT_ID: ci-placeholder.apps.googleusercontent.com
+      GOOGLE_CLIENT_SECRET: ci-only-placeholder-not-a-secret
+      ALLOWED_EMAILS: ci@example.invalid
+      NEXT_PUBLIC_OWNER_NAME: CI
+      NEXT_PUBLIC_BASE_URL: http://127.0.0.1:3000
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Run type checking
+        run: npm run typecheck
+
+      - name: Lint maintained core
+        run: npm run lint:core
+
+      - name: Build application
+        run: npm run build
+
+      # Three known high-severity transitive findings remain. Keep this visible
+      # and non-blocking until upstream fixes land; then remove continue-on-error.
+      - name: Audit high-severity dependencies (non-blocking)
+        continue-on-error: true
+        run: npm audit --audit-level=high

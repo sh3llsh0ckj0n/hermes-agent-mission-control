@@ -41,19 +41,30 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            hermes-bridge/package-lock.json
 
       - name: Install dependencies
         run: npm ci
 
+      - name: Install bridge dependencies
+        run: npm ci --prefix hermes-bridge
+
       - name: Run tests
         run: npm test
+
+      - name: Run bridge tests
+        run: npm test --prefix hermes-bridge
 
       - name: Run type checking
         run: npm run typecheck
 
       - name: Lint maintained core
         run: npm run lint:core
+
+      - name: Validate bridge syntax
+        run: npm run check --prefix hermes-bridge
 
       - name: Build application
         run: npm run build
@@ -63,3 +74,9 @@ jobs:
       - name: Audit high-severity dependencies (non-blocking)
         continue-on-error: true
         run: npm audit --audit-level=high
+
+      # Keep the bridge audit visible and non-blocking under the same policy.
+      # Make both audits required once the documented upstream findings clear.
+      - name: Audit bridge high-severity dependencies (non-blocking)
+        continue-on-error: true
+        run: npm audit --audit-level=high --prefix hermes-bridge

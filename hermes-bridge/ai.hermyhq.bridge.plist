@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   launchd service for the Hermy HQ ↔ Hermes bridge.
-  Edit the CAPITALIZED placeholders, then:
+  Create a mode-0600 env file outside the repository, edit the CAPITALIZED
+  path placeholders, then:
     cp ai.hermyhq.bridge.plist ~/Library/LaunchAgents/
     launchctl load ~/Library/LaunchAgents/ai.hermyhq.bridge.plist
   Logs: /tmp/hermes-bridge.out.log  /tmp/hermes-bridge.err.log
@@ -15,15 +16,12 @@
   <array>
     <string>/usr/bin/env</string>
     <string>node</string>
+    <string>--env-file=/Users/YOU/.config/hermes-bridge/env</string>
     <string>/ABSOLUTE/PATH/TO/hermes-bridge/bridge.mjs</string>
   </array>
 
   <key>EnvironmentVariables</key>
   <dict>
-    <key>DATABASE_URL</key>
-    <string>PASTE_YOUR_DATABASE_URL_HERE</string>
-    <key>HERMES_BOARD</key>
-    <string>default</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/YOU/.local/bin</string>
   </dict>

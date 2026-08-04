@@ -8,7 +8,7 @@
     "postinstall": "prisma generate",
     "start": "next start",
     "lint": "eslint",
-    "lint:core": "eslint \"src/app/page.tsx\" \"src/app/hermes/**/*.{ts,tsx}\" \"src/app/memory-wiki/**/*.{ts,tsx}\" \"src/app/api/hermes/**/*.{ts,tsx}\" \"src/components/sidebar.tsx\" \"src/components/command-palette.tsx\" \"src/components/conditional-layout.tsx\" \"src/components/breadcrumbs.tsx\" \"src/config/**/*.{ts,tsx}\" \"src/lib/auth.ts\" \"src/lib/env.ts\" \"src/lib/security.ts\" \"src/lib/dashboard.ts\" \"src/lib/hermes-client.ts\" \"src/lib/hermes-service.ts\" \"tests/**/*.ts\"",
+    "lint:core": "eslint \"src/app/page.tsx\" \"src/app/hermes/**/*.{ts,tsx}\" \"src/app/memory-wiki/**/*.{ts,tsx}\" \"src/app/api/hermes/**/*.{ts,tsx}\" \"src/components/sidebar.tsx\" \"src/components/command-palette.tsx\" \"src/components/conditional-layout.tsx\" \"src/components/breadcrumbs.tsx\" \"src/config/**/*.{ts,tsx}\" \"src/lib/auth.ts\" \"src/lib/env.ts\" \"src/lib/security.ts\" \"src/lib/dashboard.ts\" \"src/lib/hermes-client.ts\" \"src/lib/hermes-service.ts\" \"src/lib/hermes-request.ts\" \"hermes-bridge/**/*.mjs\" \"tests/**/*.ts\"",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "db:push": "prisma db push",

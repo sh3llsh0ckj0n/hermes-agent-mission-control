@@ -1,69 +1,140 @@
 #!/usr/bin/env node
 /**
- * Hermy HQ ↔ Hermes bridge.
+ * Hermes mission-control bridge.
  *
- * Runs on the Mac mini where Hermes lives. Talks to the shared Postgres
- * (the same DATABASE_URL the website uses) — nothing is exposed to the
- * internet. Two jobs:
- *
- *   PULL  (Hermes → website): mirror the kanban board into HermesTask,
- *         cron list + health into DataStore, and emit activity events.
- *   PUSH  (website → Hermes): pick up AgentRequest rows that are `queued`
- *         (safe) or `approved` (human-approved side-effecting), run them
- *         through the `hermes` CLI, and write results back.
- *
- * Requires: the `hermes` binary on PATH, and env DATABASE_URL.
- * Optional env: HERMES_BOARD (default "default"), BRIDGE_POLL_MS (5000),
- *               BRIDGE_MIRROR_MS (30000), HERMES_BIN (default "hermes").
+ * The bridge mirrors local Hermes state into PostgreSQL and atomically claims
+ * approved work from AgentRequest. It does not expose an inbound network port.
  */
 import pg from "pg";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-const execFileP = promisify(execFile);
-const HERMES = process.env.HERMES_BIN || "hermes";
+import { buildHermesCommand, parseRequestPayload } from "./lib/command-builder.mjs";
+import { BridgeError, classifyError, sanitizeErrorMessage, ValidationError } from "./lib/errors.mjs";
+import { createLogger } from "./lib/logger.mjs";
+import { checkHermesCompatibility, runProcess, validateExecutable } from "./lib/process-runner.mjs";
+import { claimRequests } from "./lib/queue.mjs";
+import { classifyRequestKind } from "./lib/request-policy.mjs";
+import { withBoundedRetry } from "./lib/retry.mjs";
+import { parseDatabaseTransport } from "./lib/tls.mjs";
+import { createWikiPathGuard } from "./lib/wiki-path.mjs";
+
+const BRIDGE_VERSION = JSON.parse(
+  fs.readFileSync(new URL("./package.json", import.meta.url), "utf8"),
+).version;
+const MAX_RESULT_BYTES = 8_000;
+const MAX_EVENT_DETAIL_BYTES = 400;
+
+function integerEnv(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const raw = process.env[name];
+  const value = raw === undefined ? fallback : Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new ValidationError(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return value;
+}
+
+function createInstanceId() {
+  const configured = process.env.BRIDGE_INSTANCE_ID?.trim();
+  const generated = `${os.hostname()}-${process.pid}-${randomUUID().slice(0, 8)}`;
+  const value = configured || generated;
+  if (!/^[A-Za-z0-9._:-]{1,120}$/.test(value)) {
+    throw new ValidationError(
+      "BRIDGE_INSTANCE_ID may contain only letters, numbers, dot, underscore, colon, and hyphen",
+    );
+  }
+  return value;
+}
+
+const INSTANCE_ID = createInstanceId();
+const log = createLogger({ instanceId: INSTANCE_ID });
+const HERMES = validateExecutable(process.env.HERMES_BIN || "hermes");
 const BOARD = process.env.HERMES_BOARD || "default";
-const POLL_MS = Number(process.env.BRIDGE_POLL_MS || 5000);
-const MIRROR_MS = Number(process.env.BRIDGE_MIRROR_MS || 30000);
-const RUN_TIMEOUT_MS = Number(process.env.BRIDGE_RUN_TIMEOUT_MS || 240000);
-const WIKI_DIR = process.env.HERMES_WIKI || path.join(os.homedir(), ".hermes", "wiki");
-const BRIEF_HOUR = Number(process.env.BRIEF_HOUR || 8);   // local hour to auto-generate the daily brief
+const POLL_MS = integerEnv("BRIDGE_POLL_MS", 5_000, { min: 250, max: 3_600_000 });
+const MIRROR_MS = integerEnv("BRIDGE_MIRROR_MS", 30_000, { min: 1_000, max: 3_600_000 });
+const RUN_TIMEOUT_MS = integerEnv("BRIDGE_RUN_TIMEOUT_MS", 240_000, {
+  min: 1_000,
+  max: 3_600_000,
+});
+const CLAIM_BATCH_SIZE = integerEnv("BRIDGE_CLAIM_BATCH_SIZE", 1, { min: 1, max: 10 });
+const MAX_RETRY_ATTEMPTS = integerEnv("BRIDGE_MAX_RETRY_ATTEMPTS", 3, { min: 1, max: 5 });
+const HERMES_MIN_VERSION = process.env.HERMES_MIN_VERSION || "0.17.0";
+const HERMES_MAX_VERSION_EXCLUSIVE =
+  process.env.HERMES_MAX_VERSION_EXCLUSIVE || "0.21.0";
+const WIKI_PATHS = createWikiPathGuard(
+  process.env.HERMES_WIKI || path.join(os.homedir(), ".hermes", "wiki"),
+);
+const BRIEF_HOUR = integerEnv("BRIEF_HOUR", 8, { min: 0, max: 23 });
 const BRIEF_PROMPT =
-  "You are the operator's chief of staff. Produce today's brief. Read your memory wiki open-loops " +
-  "(~/.hermes/wiki), the kanban board, and recent activity. Output ONLY valid JSON (no prose, no code fences) " +
-  'in exactly this shape: {"greeting":"one warm line","summary":"2-3 sentences on where things stand",' +
+  "You are the operator's chief of staff. Produce today's brief. Read the configured memory wiki, " +
+  "the kanban board, and recent activity. Output ONLY valid JSON (no prose, no code fences) in exactly " +
+  'this shape: {"greeting":"one warm line","summary":"2-3 sentences on where things stand",' +
   '"sections":[{"label":"Needs your decision","items":["..."]},{"label":"Top priorities","items":["..."]},' +
   '{"label":"Recently shipped","items":["..."]},{"label":"Next actions","items":["..."]}]}. ' +
   "Keep every item short, concrete, and specific. Omit a section if it has nothing.";
+
+const databaseUrl = process.env.DATABASE_URL || "";
+const transport = parseDatabaseTransport({
+  databaseUrl,
+  tlsMode: process.env.BRIDGE_DB_TLS_MODE,
+  caFile: process.env.BRIDGE_DB_CA_FILE,
+  nodeEnv: process.env.NODE_ENV,
+});
+const pool = new pg.Pool({
+  connectionString: databaseUrl,
+  max: 4,
+  ssl: transport.ssl,
+  application_name: `hermes-bridge:${INSTANCE_ID}`,
+});
+
+const shutdownController = new AbortController();
 let lastBriefDate = null;
+let shuttingDown = false;
+let queueTimer = null;
+let mirrorTimer = null;
+let activeQueue = null;
 
-const DB_URL = process.env.DATABASE_URL || "";
-if (!DB_URL) { console.error("DATABASE_URL is required (use the direct postgres:// URL, not a prisma:// Accelerate URL)"); process.exit(1); }
-if (DB_URL.startsWith("prisma://") || DB_URL.startsWith("prisma+")) {
-  console.error("DATABASE_URL is a Prisma Accelerate URL; the bridge needs a DIRECT postgres:// connection string (e.g. POSTGRES_URL).");
-  process.exit(1);
-}
-// Cloud Postgres (Prisma Postgres/Neon/Supabase/RDS) needs SSL; localhost doesn't.
-const isLocal = /@(localhost|127\.0\.0\.1)/.test(DB_URL);
-const pool = new pg.Pool({ connectionString: DB_URL, max: 4, ssl: isLocal ? undefined : { rejectUnauthorized: false } });
-
-const log = (...a) => console.log(new Date().toISOString(), ...a);
-const q = (text, params) => pool.query(text, params);
-
-async function hermes(args, { timeout = 30000 } = {}) {
-  const { stdout } = await execFileP(HERMES, args, { timeout, maxBuffer: 8 * 1024 * 1024 });
-  return stdout;
+async function q(text, params) {
+  try {
+    return await pool.query(text, params);
+  } catch (error) {
+    throw new BridgeError(
+      "database_failure",
+      sanitizeErrorMessage(error?.message || "PostgreSQL operation failed"),
+      { retryable: true, cause: error },
+    );
+  }
 }
 
-async function emit(kind, title, { detail = null, agent = "hermes", level = "info", meta = null } = {}) {
+async function hermes(args, { timeoutMs = 30_000 } = {}) {
+  const result = await runProcess(HERMES, args, {
+    timeoutMs,
+    maxOutputBytes: 1024 * 1024,
+    signal: shutdownController.signal,
+  });
+  return result.stdout;
+}
+
+async function emit(kind, title, {
+  detail = null,
+  agent = "hermes",
+  level = "info",
+  meta = null,
+} = {}) {
   await q(
     `INSERT INTO "AgentEvent" (id, kind, title, detail, agent, level, meta, "createdAt")
      VALUES ($1,$2,$3,$4,$5,$6,$7, now())`,
-    [randomUUID(), kind, title.slice(0, 200), detail, agent, level, meta ? JSON.stringify(meta) : null]
+    [
+      randomUUID(),
+      kind,
+      title.slice(0, 200),
+      detail,
+      agent,
+      level,
+      meta ? JSON.stringify(meta) : null,
+    ],
   );
 }
 
@@ -71,23 +142,30 @@ async function setStore(key, data) {
   await q(
     `INSERT INTO "DataStore" (key, data, "updatedAt") VALUES ($1,$2, now())
      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, "updatedAt" = now()`,
-    [key, JSON.stringify(data)]
+    [key, JSON.stringify(data)],
   );
 }
 
-/* ─────────────── PULL: mirror Hermes → Postgres ─────────────── */
 async function mirrorKanban() {
   let tasks = [];
   try {
-    // NB: this Hermes CLI wants --board BEFORE the subcommand.
-    const out = await hermes(["kanban", "--board", BOARD, "list", "--json"], { timeout: 15000 });
+    // Supported Hermes releases expect --board before the kanban subcommand.
+    const out = await hermes(["kanban", "--board", BOARD, "list", "--json"], {
+      timeoutMs: 15_000,
+    });
     const parsed = JSON.parse(out || "[]");
     tasks = Array.isArray(parsed) ? parsed : parsed.tasks || [];
-  } catch (e) { log("kanban list failed:", e.message.split("\n")[0]); return; }
+  } catch (error) {
+    log("warn", "kanban_mirror_failed", {
+      category: classifyError(error).category,
+      error: sanitizeErrorMessage(error?.message),
+    });
+    return;
+  }
 
   const seen = new Set();
-  for (const t of tasks) {
-    const id = String(t.id ?? t.task_id ?? "");
+  for (const task of tasks) {
+    const id = String(task.id ?? task.task_id ?? "");
     if (!id) continue;
     seen.add(id);
     await q(
@@ -96,14 +174,23 @@ async function mirrorKanban() {
        ON CONFLICT (id) DO UPDATE SET
          title=EXCLUDED.title, assignee=EXCLUDED.assignee, status=EXCLUDED.status,
          priority=EXCLUDED.priority, result=EXCLUDED.result, "syncedAt"=now()`,
-      [id, BOARD, String(t.title ?? "untitled").slice(0, 300), t.assignee ?? null,
-       String(t.status ?? "todo"), t.priority != null ? Number(t.priority) : null,
-       t.result ? String(t.result).slice(0, 2000) : null]
+      [
+        id,
+        BOARD,
+        String(task.title ?? "untitled").slice(0, 300),
+        task.assignee ?? null,
+        String(task.status ?? "todo"),
+        task.priority != null ? Number(task.priority) : null,
+        task.result ? String(task.result).slice(0, 2_000) : null,
+      ],
     );
   }
-  // prune tasks that vanished from the board
+
   if (seen.size) {
-    await q(`DELETE FROM "HermesTask" WHERE board=$1 AND id <> ALL($2::text[])`, [BOARD, [...seen]]);
+    await q(`DELETE FROM "HermesTask" WHERE board=$1 AND id <> ALL($2::text[])`, [
+      BOARD,
+      [...seen],
+    ]);
   } else {
     await q(`DELETE FROM "HermesTask" WHERE board=$1`, [BOARD]);
   }
@@ -111,68 +198,125 @@ async function mirrorKanban() {
 
 async function mirrorCrons() {
   try {
-    const out = await hermes(["cron", "list", "--all"], { timeout: 15000 });
-    const lines = out.split("\n").map((l) => l.trimEnd()).filter(Boolean);
-    await setStore("hermes-crons", { jobs: lines, raw: out.slice(0, 8000), syncedAt: new Date().toISOString() });
-  } catch (e) { log("cron list failed:", e.message.split("\n")[0]); }
+    const out = await hermes(["cron", "list", "--all"], { timeoutMs: 15_000 });
+    const lines = out.split("\n").map((line) => line.trimEnd()).filter(Boolean);
+    await setStore("hermes-crons", {
+      jobs: lines,
+      raw: out.slice(0, 8_000),
+      syncedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    log("warn", "cron_mirror_failed", {
+      category: classifyError(error).category,
+      error: sanitizeErrorMessage(error?.message),
+    });
+  }
 }
 
 async function mirrorCost() {
   for (const args of [["insights", "--days", "7"], ["insights"]]) {
     try {
-      const out = await hermes(args, { timeout: 15000 });
-      await setStore("hermes-cost", { summary: out.slice(0, 4000), syncedAt: new Date().toISOString() });
+      const out = await hermes(args, { timeoutMs: 15_000 });
+      await setStore("hermes-cost", {
+        summary: out.slice(0, 4_000),
+        syncedAt: new Date().toISOString(),
+      });
       return;
-    } catch { /* try next arg shape */ }
+    } catch {
+      // Supported Hermes releases have shipped both argument shapes; try the fallback.
+    }
   }
+  log("warn", "cost_mirror_failed", { category: "hermes_cli_failure" });
 }
 
 async function mirrorHealth() {
-  let online = false, gateway = "unknown", detail = "";
+  let online = false;
+  let gateway = "unknown";
+  let detail = "";
   try {
-    const out = await hermes(["status"], { timeout: 12000 });
-    detail = out.slice(0, 4000);
+    const out = await hermes(["status"], { timeoutMs: 12_000 });
+    detail = out.slice(0, 4_000);
     online = /online|running|connected/i.test(out);
     gateway = /gateway[^\n]*(running|online)/i.test(out) ? "running" : "stopped";
-  } catch (e) { detail = e.message.split("\n")[0]; }
-  await setStore("hermes-health", { online, gateway, detail, lastSeen: new Date().toISOString() });
+  } catch (error) {
+    detail = sanitizeErrorMessage(error?.message);
+  }
+  await setStore("hermes-health", {
+    online,
+    gateway,
+    detail,
+    lastSeen: new Date().toISOString(),
+  });
 }
 
-/* ─────────────── Memory Wiki (warm tier: git-tracked markdown) ─────────────── */
-function parseEntry(md) {
-  const m = md.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-  const fm = {}; let body = md;
-  if (m) {
-    body = m[2];
-    for (const line of m[1].split("\n")) {
-      const kv = line.match(/^([A-Za-z_]+):\s*(.*)$/);
-      if (!kv) continue;
-      const v = kv[2].trim();
-      if (v.startsWith("[") && v.endsWith("]")) fm[kv[1]] = v.slice(1, -1).split(",").map((s) => s.trim()).filter(Boolean);
-      else fm[kv[1]] = v === "null" || v === "" ? null : v;
+function parseEntry(markdown) {
+  const match = markdown.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  const frontmatter = {};
+  let body = markdown;
+  if (match) {
+    body = match[2];
+    for (const line of match[1].split("\n")) {
+      const pair = line.match(/^([A-Za-z_]+):\s*(.*)$/);
+      if (!pair) continue;
+      const value = pair[2].trim();
+      if (value.startsWith("[") && value.endsWith("]")) {
+        frontmatter[pair[1]] = value
+          .slice(1, -1)
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean);
+      } else {
+        frontmatter[pair[1]] = value === "null" || value === "" ? null : value;
+      }
     }
   }
-  return { fm, body: body.trim() };
+  return { frontmatter, body: body.trim() };
 }
-function walkMd(dir, out = []) {
+
+function walkMarkdown(directory, output = []) {
   let items = [];
-  try { items = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
-  for (const it of items) {
-    const full = path.join(dir, it.name);
-    if (it.isDirectory()) { if (it.name !== ".git") walkMd(full, out); }
-    else if (it.name.endsWith(".md") && it.name !== "INDEX.md") out.push(full);
+  try {
+    items = fs.readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return output;
   }
-  return out;
+  for (const item of items) {
+    if (item.isSymbolicLink() || item.name === ".git") continue;
+    const fullPath = path.join(directory, item.name);
+    if (item.isDirectory()) {
+      walkMarkdown(fullPath, output);
+    } else if (item.name.toLowerCase().endsWith(".md") && item.name !== "INDEX.md") {
+      output.push(fullPath);
+    }
+  }
+  return output;
 }
+
 async function mirrorWiki() {
-  if (!fs.existsSync(WIKI_DIR)) return;
+  if (!fs.existsSync(WIKI_PATHS.root)) return;
   const seen = new Set();
-  for (const file of walkMd(WIKI_DIR)) {
-    const rel = path.relative(WIKI_DIR, file);
-    const id = rel.replace(/\.md$/, "");
+  for (const discoveredPath of walkMarkdown(WIKI_PATHS.root)) {
+    const requestedPath = path.relative(WIKI_PATHS.root, discoveredPath).replaceAll("\\", "/");
+    let resolved;
+    try {
+      resolved = WIKI_PATHS.resolveMarkdownPath(requestedPath, { mustExist: true });
+    } catch (error) {
+      log("warn", "wiki_path_rejected", {
+        category: classifyError(error).category,
+        path: requestedPath,
+      });
+      continue;
+    }
+
+    const id = resolved.relativePath.replace(/\.md$/i, "");
     seen.add(id);
-    let raw = ""; try { raw = fs.readFileSync(file, "utf8"); } catch { continue; }
-    const { fm, body } = parseEntry(raw);
+    let raw;
+    try {
+      raw = fs.readFileSync(resolved.absolutePath, "utf8");
+    } catch {
+      continue;
+    }
+    const { frontmatter, body } = parseEntry(raw);
     await q(
       `INSERT INTO "HermesMemory" (id, path, type, title, status, confidence, provenance, tags, links, body, "validFrom", "validTo", "updatedAt", "syncedAt")
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now(), now())
@@ -180,132 +324,410 @@ async function mirrorWiki() {
          status=EXCLUDED.status, confidence=EXCLUDED.confidence, provenance=EXCLUDED.provenance,
          tags=EXCLUDED.tags, links=EXCLUDED.links, body=EXCLUDED.body,
          "validFrom"=EXCLUDED."validFrom", "validTo"=EXCLUDED."validTo", "syncedAt"=now()`,
-      [id, rel, fm.type || "fact", fm.title || id, fm.status || "active", fm.confidence || null,
-       fm.provenance || null, Array.isArray(fm.tags) ? fm.tags : [], Array.isArray(fm.links) ? fm.links : [],
-       body, fm.valid_from || null, fm.valid_to || null]
+      [
+        id,
+        resolved.relativePath,
+        frontmatter.type || "fact",
+        frontmatter.title || id,
+        frontmatter.status || "active",
+        frontmatter.confidence || null,
+        frontmatter.provenance || null,
+        Array.isArray(frontmatter.tags) ? frontmatter.tags : [],
+        Array.isArray(frontmatter.links) ? frontmatter.links : [],
+        body,
+        frontmatter.valid_from || null,
+        frontmatter.valid_to || null,
+      ],
     );
   }
-  if (seen.size) await q(`DELETE FROM "HermesMemory" WHERE id <> ALL($1::text[])`, [[...seen]]);
-  else await q(`DELETE FROM "HermesMemory"`);
-}
-function writeWikiEntry(e) {
-  const rel = e.path || `${e.type || "note"}s/${e.id}.md`;
-  const full = path.join(WIKI_DIR, rel);
-  fs.mkdirSync(path.dirname(full), { recursive: true });
-  const now = new Date().toISOString().slice(0, 10);
-  const lines = [
-    "---", `id: ${e.id}`, `type: ${e.type || "note"}`, `title: ${e.title}`,
-    `status: ${e.status || "active"}`,
-    e.confidence ? `confidence: ${e.confidence}` : null,
-    `provenance: ${e.provenance || "dashboard"}`,
-    `tags: [${(e.tags || []).join(", ")}]`, `links: [${(e.links || []).join(", ")}]`,
-    `updated: ${now}`, "---", "", e.body || "", "",
-  ].filter((l) => l !== null);
-  fs.writeFileSync(full, lines.join("\n"), "utf8");
-  return rel;
-}
-async function gitCommitWiki(msg) {
-  try {
-    if (!fs.existsSync(path.join(WIKI_DIR, ".git"))) await execFileP("git", ["-C", WIKI_DIR, "init"]).catch(() => {});
-    await execFileP("git", ["-C", WIKI_DIR, "add", "-A"]).catch(() => {});
-    await execFileP("git", ["-C", WIKI_DIR, "commit", "-m", msg]).catch(() => {});
-  } catch { /* ignore */ }
+
+  if (seen.size) {
+    await q(`DELETE FROM "HermesMemory" WHERE id <> ALL($1::text[])`, [[...seen]]);
+  } else {
+    await q(`DELETE FROM "HermesMemory"`);
+  }
 }
 
-/* ─────────────── Chief-of-staff daily brief ─────────────── */
+function frontmatterValue(value, label, maxLength = 500) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized || normalized.length > maxLength || /[\0\r\n]/.test(normalized)) {
+    throw new ValidationError(`${label} is invalid`);
+  }
+  return normalized;
+}
+
+function writeWikiEntry(entry) {
+  const id = frontmatterValue(entry.id, "Wiki entry ID");
+  const type = frontmatterValue(entry.type || "note", "Wiki entry type", 100);
+  const title = frontmatterValue(entry.title, "Wiki entry title");
+  const requestedPath = entry.path || `${type}s/${id}.md`;
+  const resolved = WIKI_PATHS.resolveMarkdownPath(requestedPath);
+  fs.mkdirSync(path.dirname(resolved.absolutePath), { recursive: true });
+  WIKI_PATHS.resolveMarkdownPath(resolved.relativePath);
+
+  const tags = Array.isArray(entry.tags)
+    ? entry.tags.map((tag) => frontmatterValue(tag, "Wiki tag", 100))
+    : [];
+  const links = Array.isArray(entry.links)
+    ? entry.links.map((link) => frontmatterValue(link, "Wiki link", 500))
+    : [];
+  const now = new Date().toISOString().slice(0, 10);
+  const lines = [
+    "---",
+    `id: ${id}`,
+    `type: ${type}`,
+    `title: ${title}`,
+    `status: ${frontmatterValue(entry.status || "active", "Wiki entry status", 100)}`,
+    entry.confidence
+      ? `confidence: ${frontmatterValue(entry.confidence, "Wiki confidence", 100)}`
+      : null,
+    `provenance: ${frontmatterValue(entry.provenance || "dashboard", "Wiki provenance", 200)}`,
+    `tags: [${tags.join(", ")}]`,
+    `links: [${links.join(", ")}]`,
+    `updated: ${now}`,
+    "---",
+    "",
+    String(entry.body || ""),
+    "",
+  ].filter((line) => line !== null);
+  fs.writeFileSync(resolved.absolutePath, lines.join("\n"), {
+    encoding: "utf8",
+    flag: "w",
+  });
+  return resolved.relativePath;
+}
+
+async function gitCommitWiki(relativePath) {
+  const resolved = WIKI_PATHS.resolveMarkdownPath(relativePath, { mustExist: true });
+  if (!fs.existsSync(path.join(WIKI_PATHS.root, ".git"))) {
+    await runProcess("git", ["-C", WIKI_PATHS.root, "init"], {
+      timeoutMs: 15_000,
+      maxOutputBytes: 256 * 1024,
+      signal: shutdownController.signal,
+    });
+  }
+  await runProcess("git", ["-C", WIKI_PATHS.root, "add", "--", resolved.relativePath], {
+    timeoutMs: 15_000,
+    maxOutputBytes: 256 * 1024,
+    signal: shutdownController.signal,
+  });
+  await runProcess(
+    "git",
+    ["-C", WIKI_PATHS.root, "commit", "-m", `wiki: update ${resolved.relativePath} (via dashboard)`],
+    {
+      timeoutMs: 15_000,
+      maxOutputBytes: 256 * 1024,
+      signal: shutdownController.signal,
+    },
+  );
+}
+
 async function generateBriefing() {
-  const raw = (await hermes(["-z", BRIEF_PROMPT], { timeout: RUN_TIMEOUT_MS })).trim();
+  const raw = (await hermes(["-z", BRIEF_PROMPT], { timeoutMs: RUN_TIMEOUT_MS })).trim();
   let brief;
   try {
-    const jsonStr = raw.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
-    const m = jsonStr.match(/\{[\s\S]*\}/);
-    brief = JSON.parse(m ? m[0] : jsonStr);
-  } catch { brief = { summary: raw.slice(0, 1500), sections: [] }; }
+    const jsonText = raw.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+    const match = jsonText.match(/\{[\s\S]*\}/);
+    brief = JSON.parse(match ? match[0] : jsonText);
+  } catch {
+    brief = { summary: raw.slice(0, 1_500), sections: [] };
+  }
   brief.generatedAt = new Date().toISOString();
   await setStore("hermes-briefing", brief);
   await emit("status", "Daily brief generated", { level: "up" });
 }
+
 async function maybeDailyBrief() {
   const now = new Date();
   const today = now.toISOString().slice(0, 10);
   if (now.getHours() >= BRIEF_HOUR && lastBriefDate !== today) {
     lastBriefDate = today;
-    try { await generateBriefing(); } catch (e) { log("daily brief err", e.message); }
+    try {
+      await generateBriefing();
+    } catch (error) {
+      log("warn", "daily_brief_failed", {
+        category: classifyError(error).category,
+        error: sanitizeErrorMessage(error?.message),
+      });
+    }
   }
 }
 
-/* ─────────────── PUSH: run website requests via Hermes ─────────────── */
-async function runRequest(r) {
-  await q(`UPDATE "AgentRequest" SET status='running', "startedAt"=now(), "updatedAt"=now() WHERE id=$1`, [r.id]);
-  await emit("run", `Started: ${r.title}`, { level: "info", meta: { requestId: r.id, kind: r.kind } });
-  try {
-    let result = "";
-    if (r.kind === "oneshot" || r.kind === "chat") {
-      result = (await hermes(["-z", r.prompt || r.title], { timeout: RUN_TIMEOUT_MS })).trim();
-    } else if (r.kind === "kanban") {
-      result = (await hermes(["kanban", "--board", BOARD, "create", "--json", r.title], { timeout: 20000 })).trim();
-    } else if (r.kind.startsWith("cron.")) {
-      const op = r.kind.split(".")[1];
-      const a = JSON.parse(r.prompt || "{}");
-      const argv =
-        op === "create" ? ["cron", "create", a.schedule, a.prompt || a.name].filter(Boolean)
-        : op === "run"    ? ["cron", "run", a.id || a.name]
-        : op === "pause"  ? ["cron", "pause", a.id || a.name]
-        : op === "resume" ? ["cron", "resume", a.id || a.name]
-        : op === "remove" ? ["cron", "remove", a.id || a.name]
-        : op === "edit"   ? ["cron", "edit", a.id || a.name]
-        : null;
-      if (!argv) throw new Error(`unknown cron op ${op}`);
-      result = (await hermes(argv, { timeout: 20000 })).trim();
-      await mirrorCrons();
-    } else if (r.kind === "memory.write") {
-      const e = JSON.parse(r.prompt || "{}");
-      const rel = writeWikiEntry(e);
-      await gitCommitWiki(`wiki: update ${rel} (via dashboard)`);
-      await mirrorWiki();
-      result = `wrote ${rel}`;
-    } else if (r.kind === "briefing.generate") {
-      await generateBriefing();
-      lastBriefDate = new Date().toISOString().slice(0, 10);
-      result = "brief updated";
-    } else {
-      throw new Error(`unknown kind ${r.kind}`);
-    }
-    await q(`UPDATE "AgentRequest" SET status='done', result=$2, "finishedAt"=now(), "updatedAt"=now() WHERE id=$1`,
-      [r.id, result.slice(0, 8000)]);
-    await emit("run", `Done: ${r.title}`, { level: "up", detail: result.slice(0, 400), meta: { requestId: r.id } });
-  } catch (e) {
-    const msg = (e.stderr || e.message || "error").toString().split("\n")[0].slice(0, 600);
-    await q(`UPDATE "AgentRequest" SET status='failed', error=$2, "finishedAt"=now(), "updatedAt"=now() WHERE id=$1`, [r.id, msg]);
-    await emit("run", `Failed: ${r.title}`, { level: "down", detail: msg, meta: { requestId: r.id } });
-    log("request failed:", r.id, msg);
+async function executeRequest(request) {
+  if (request.kind === "memory.write" || request.kind === "wiki.write") {
+    const entry = parseRequestPayload(request);
+    const relativePath = writeWikiEntry(entry);
+    await gitCommitWiki(relativePath);
+    await mirrorWiki();
+    return `wrote ${relativePath}`;
   }
+  if (request.kind === "briefing.generate") {
+    await generateBriefing();
+    lastBriefDate = new Date().toISOString().slice(0, 10);
+    return "brief updated";
+  }
+
+  const command = buildHermesCommand(request, {
+    board: BOARD,
+    runTimeoutMs: RUN_TIMEOUT_MS,
+  });
+  const result = (await hermes(command.args, { timeoutMs: command.timeoutMs })).trim();
+  if (request.kind.startsWith("cron.")) await mirrorCrons();
+  return result;
+}
+
+async function runRequest(request) {
+  let policy;
+  try {
+    policy = classifyRequestKind(request.kind);
+  } catch (error) {
+    await failRequest(request, error);
+    return;
+  }
+
+  await emit("run", `Started: ${request.title}`, {
+    level: "info",
+    meta: {
+      requestId: request.id,
+      kind: policy.kind,
+      risk: policy.risk,
+      bridgeInstanceId: INSTANCE_ID,
+    },
+  });
+  log("info", "request_started", {
+    requestId: request.id,
+    kind: policy.kind,
+    risk: policy.risk,
+  });
+
+  try {
+    const maxAttempts = policy.risk === "read_only" ? MAX_RETRY_ATTEMPTS : 1;
+    const result = await withBoundedRetry(
+      () => executeRequest(request),
+      {
+        maxAttempts,
+        signal: shutdownController.signal,
+        shouldRetry: (error) =>
+          policy.risk === "read_only" &&
+          ["hermes_cli_failure", "timeout"].includes(classifyError(error).category),
+        onRetry: ({ attempt, delayMs, error }) => {
+          log("warn", "request_retry_scheduled", {
+            requestId: request.id,
+            attempt,
+            delayMs,
+            category: classifyError(error).category,
+          });
+        },
+      },
+    );
+    await q(
+      `UPDATE "AgentRequest"
+       SET status='done', result=$2, error=NULL, "finishedAt"=now(), "updatedAt"=now()
+       WHERE id=$1 AND status='running'`,
+      [request.id, String(result).slice(0, MAX_RESULT_BYTES)],
+    );
+    await emit("run", `Done: ${request.title}`, {
+      level: "up",
+      detail: String(result).slice(0, MAX_EVENT_DETAIL_BYTES),
+      meta: { requestId: request.id, bridgeInstanceId: INSTANCE_ID },
+    });
+    log("info", "request_completed", { requestId: request.id });
+  } catch (error) {
+    await failRequest(request, error);
+  }
+}
+
+async function failRequest(request, error) {
+  const classified = classifyError(error);
+  const message = sanitizeErrorMessage(classified.message);
+  try {
+    await q(
+      `UPDATE "AgentRequest"
+       SET status='failed', error=$2, "finishedAt"=now(), "updatedAt"=now()
+       WHERE id=$1 AND status='running'`,
+      [request.id, `${classified.category}: ${message}`.slice(0, 600)],
+    );
+    await emit("run", `Failed: ${request.title}`, {
+      level: "down",
+      detail: message,
+      meta: {
+        requestId: request.id,
+        category: classified.category,
+        bridgeInstanceId: INSTANCE_ID,
+      },
+    });
+  } catch (databaseError) {
+    log("error", "request_failure_record_failed", {
+      requestId: request.id,
+      category: "database_failure",
+      error: sanitizeErrorMessage(databaseError?.message),
+    });
+  }
+  log("error", "request_failed", {
+    requestId: request.id,
+    category: classified.category,
+    error: message,
+  });
 }
 
 async function processQueue() {
-  const { rows } = await q(
-    `SELECT * FROM "AgentRequest" WHERE status IN ('queued','approved') ORDER BY "createdAt" ASC LIMIT 3`
-  );
-  for (const r of rows) await runRequest(r);
+  const requests = await claimRequests(pool, { batchSize: CLAIM_BATCH_SIZE });
+  for (const request of requests) {
+    if (shuttingDown) {
+      await failRequest(
+        request,
+        new BridgeError(
+          "shutdown_interruption",
+          "Request was claimed while the bridge was shutting down",
+        ),
+      );
+      continue;
+    }
+    await runRequest(request);
+  }
 }
 
-/* ─────────────── loops ─────────────── */
 async function mirrorTick() {
-  try { await mirrorKanban(); } catch (e) { log("mirrorKanban err", e.message); }
-  try { await mirrorCrons(); } catch (e) { log("mirrorCrons err", e.message); }
-  try { await mirrorHealth(); } catch (e) { log("mirrorHealth err", e.message); }
-  try { await mirrorWiki(); } catch (e) { log("mirrorWiki err", e.message); }
-  try { await mirrorCost(); } catch (e) { log("mirrorCost err", e.message); }
-  try { await maybeDailyBrief(); } catch (e) { log("maybeDailyBrief err", e.message); }
+  const mirrors = [
+    ["kanban", mirrorKanban],
+    ["crons", mirrorCrons],
+    ["health", mirrorHealth],
+    ["wiki", mirrorWiki],
+    ["cost", mirrorCost],
+    ["briefing", maybeDailyBrief],
+  ];
+  for (const [name, mirror] of mirrors) {
+    if (shuttingDown) return;
+    try {
+      await mirror();
+    } catch (error) {
+      log("error", "mirror_failed", {
+        mirror: name,
+        category: "database_failure",
+        error: sanitizeErrorMessage(error?.message),
+      });
+    }
+  }
+}
+
+function scheduleQueue(delay = POLL_MS) {
+  if (shuttingDown) return;
+  queueTimer = setTimeout(async () => {
+    activeQueue = processQueue();
+    try {
+      await activeQueue;
+    } catch (error) {
+      log("error", "queue_poll_failed", {
+        category: "database_failure",
+        error: sanitizeErrorMessage(error?.message),
+      });
+    } finally {
+      activeQueue = null;
+      scheduleQueue();
+    }
+  }, delay);
+}
+
+function scheduleMirror(delay = MIRROR_MS) {
+  if (shuttingDown) return;
+  mirrorTimer = setTimeout(async () => {
+    try {
+      await mirrorTick();
+    } finally {
+      scheduleMirror();
+    }
+  }, delay);
+}
+
+async function shutdown(signalName) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  clearTimeout(queueTimer);
+  clearTimeout(mirrorTimer);
+  shutdownController.abort();
+  log("info", "bridge_shutdown_started", { signal: signalName });
+
+  if (activeQueue) {
+    await Promise.race([
+      activeQueue.catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 10_000)),
+    ]);
+  }
+  try {
+    await emit("status", "Bridge disconnected", {
+      level: "warn",
+      meta: { signal: signalName, bridgeInstanceId: INSTANCE_ID },
+    });
+  } catch (error) {
+    log("warn", "shutdown_event_failed", {
+      category: "database_failure",
+      error: sanitizeErrorMessage(error?.message),
+    });
+  }
+  await pool.end().catch((error) => {
+    log("warn", "database_pool_close_failed", {
+      category: "database_failure",
+      error: sanitizeErrorMessage(error?.message),
+    });
+  });
+  log("info", "bridge_shutdown_complete", { signal: signalName });
 }
 
 async function main() {
-  log(`hermes-bridge up · board=${BOARD} · poll=${POLL_MS}ms · mirror=${MIRROR_MS}ms`);
-  await emit("status", "Bridge connected", { level: "up" });
+  const hermesVersion = await checkHermesCompatibility({
+    executable: HERMES,
+    minimumVersion: HERMES_MIN_VERSION,
+    maximumVersionExclusive: HERMES_MAX_VERSION_EXCLUSIVE,
+    signal: shutdownController.signal,
+  });
+  log("info", "bridge_startup", {
+    version: BRIDGE_VERSION,
+    hermesVersion,
+    nodeVersion: process.versions.node,
+    platform: process.platform,
+    architecture: process.arch,
+    board: BOARD,
+    pollMs: POLL_MS,
+    mirrorMs: MIRROR_MS,
+    claimBatchSize: CLAIM_BATCH_SIZE,
+    tlsMode: transport.tlsMode,
+  });
+  await emit("status", "Bridge connected", {
+    level: "up",
+    meta: {
+      version: BRIDGE_VERSION,
+      instanceId: INSTANCE_ID,
+      hermesVersion,
+      platform: process.platform,
+      architecture: process.arch,
+    },
+  });
   await mirrorTick();
-  setInterval(() => mirrorTick().catch((e) => log("mirror loop", e.message)), MIRROR_MS);
-  // queue loop
-  const tick = async () => { try { await processQueue(); } catch (e) { log("queue loop", e.message); } finally { setTimeout(tick, POLL_MS); } };
-  tick();
+  scheduleMirror();
+  scheduleQueue(0);
 }
-main().catch((e) => { console.error("fatal", e); process.exit(1); });
+
+for (const signalName of ["SIGINT", "SIGTERM"]) {
+  process.once(signalName, () => {
+    shutdown(signalName)
+      .then(() => {
+        process.exitCode = 0;
+      })
+      .catch((error) => {
+        log("error", "bridge_shutdown_failed", {
+          category: classifyError(error).category,
+          error: sanitizeErrorMessage(error?.message),
+        });
+        process.exitCode = 1;
+      });
+  });
+}
+
+main().catch(async (error) => {
+  log("error", "bridge_fatal", {
+    category: classifyError(error).category,
+    error: sanitizeErrorMessage(error?.message),
+  });
+  await pool.end().catch(() => {});
+  process.exitCode = 1;
+});

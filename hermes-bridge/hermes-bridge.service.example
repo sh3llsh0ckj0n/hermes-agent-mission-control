@@ -1,0 +1,27 @@
+[Unit]
+Description=Hermes mission-control bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermes-bridge
+Group=hermes-bridge
+WorkingDirectory=/opt/hermes-agent-mission-control/hermes-bridge
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/hermes-bridge/hermes-bridge.env
+ExecStart=/usr/bin/node /opt/hermes-agent-mission-control/hermes-bridge/bridge.mjs
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/hermes-bridge
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -4,7 +4,6 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
   Fragment,
 } from "react";
@@ -28,6 +27,7 @@ import {
   Skeleton,
   Eyebrow,
 } from "@/components/ui/kit";
+import { fetchHermesJSON } from "@/lib/hermes-client";
 
 // ── Types ─────────────────────────────────────────────────
 type MemType =
@@ -112,16 +112,6 @@ function fmtDate(d: string | null): string {
     day: "numeric",
     year: "numeric",
   });
-}
-
-async function getJSON<T>(url: string): Promise<T | null> {
-  try {
-    const r = await fetch(url);
-    if (!r.ok) return null;
-    return (await r.json()) as T;
-  } catch {
-    return null;
-  }
 }
 
 // ── Confidence dot ────────────────────────────────────────
@@ -632,6 +622,8 @@ export default function MemoryWikiPage() {
   const [total, setTotal] = useState(0);
   const [lastSync, setLastSync] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [editor, setEditor] = useState<{ draft: Draft; isNew: boolean } | null>(
@@ -649,23 +641,34 @@ export default function MemoryWikiPage() {
     if (q) params.set("q", q);
     if (typeFilter !== "all") params.set("type", typeFilter);
     params.set("status", statusAll ? "all" : "active");
-    const data = await getJSON<MemoryResponse>(
+    const result = await fetchHermesJSON<MemoryResponse>(
       `/api/hermes/memory?${params.toString()}`
     );
-    if (data) {
-      setEntries(data.entries ?? []);
-      setTypeCounts(data.typeCounts ?? {});
-      setTotal(data.total ?? 0);
-      setLastSync(data.lastSync ?? null);
+    if (result.status === "ok") {
+      setEntries(result.data.entries ?? []);
+      setTypeCounts(result.data.typeCounts ?? {});
+      setTotal(result.data.total ?? 0);
+      setLastSync(result.data.lastSync ?? null);
+      setUnavailable(false);
+      setLoadError(null);
+    } else if (result.status === "unavailable") {
+      setUnavailable(true);
+      setLoadError(null);
+    } else {
+      setUnavailable(false);
+      setLoadError(result.error.message);
     }
     setLoaded(true);
   }, [q, typeFilter, statusAll]);
 
   // Reload on filter change + poll every 10s
   useEffect(() => {
-    load();
+    const initial = setTimeout(load, 0);
     const iv = setInterval(load, 10000);
-    return () => clearInterval(iv);
+    return () => {
+      clearTimeout(initial);
+      clearInterval(iv);
+    };
   }, [load]);
 
   const chips = useMemo(() => {
@@ -776,6 +779,22 @@ export default function MemoryWikiPage() {
               <Skeleton className="h-24" />
               <Skeleton className="h-24" />
             </>
+          ) : unavailable ? (
+            <Panel className="p-2">
+              <EmptyState
+                icon={<BookOpen className="w-6 h-6" />}
+                title="Hermes memory is not connected"
+                hint="The Hermes database or bridge is unavailable. Connection checks will retry in the background."
+              />
+            </Panel>
+          ) : loadError ? (
+            <Panel className="p-2">
+              <EmptyState
+                icon={<BookOpen className="w-6 h-6" />}
+                title="Hermes memory failed to load"
+                hint={`${loadError}. This is an unexpected server error and will continue to be reported.`}
+              />
+            </Panel>
           ) : entries.length === 0 ? (
             <Panel className="p-2">
               <EmptyState

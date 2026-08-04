@@ -26,6 +26,10 @@ import {
 } from "@/components/ui/kit";
 import { HermesDispatches } from "@/components/hermes-dispatches";
 import { HermesRuns } from "@/components/hermes-runs";
+import {
+  clearHermesUnavailableCooldown,
+  fetchHermesJSON,
+} from "@/lib/hermes-client";
 
 // ── Types ─────────────────────────────────────────────────
 type ReqStatus =
@@ -94,16 +98,6 @@ function timeAgo(d: string | null): string {
   if (h < 24) return `${h}h ago`;
   const days = Math.floor(h / 24);
   return `${days}d ago`;
-}
-
-async function getJSON<T>(url: string): Promise<T | null> {
-  try {
-    const r = await fetch(url);
-    if (!r.ok) return null;
-    return (await r.json()) as T;
-  } catch {
-    return null;
-  }
 }
 
 // ── Task board column order ───────────────────────────────
@@ -744,46 +738,90 @@ export default function HermesPage() {
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [cronSync, setCronSync] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
-    const [h, reqs, act, tk, cr] = await Promise.all([
-      getJSON<Health>("/api/hermes/health"),
-      getJSON<{ requests: Req[]; pending: number }>(
+    const healthResult = await fetchHermesJSON<Health>("/api/hermes/health");
+
+    if (healthResult.status === "unavailable") {
+      setHealth(null);
+      setUnavailable(true);
+      setLoadError(null);
+      setLoaded(true);
+      return;
+    }
+
+    if (healthResult.status === "error") {
+      setUnavailable(false);
+      setLoadError(healthResult.error.message);
+      setLoaded(true);
+      return;
+    }
+
+    const [reqs, act, tk, cr] = await Promise.all([
+      fetchHermesJSON<{ requests: Req[]; pending: number }>(
         "/api/hermes/requests?status=awaiting_approval&take=50"
       ),
-      getJSON<{ events: Ev[] }>("/api/hermes/activity?take=40"),
-      getJSON<{ tasks: Task[]; counts: Record<string, number>; total: number; lastSync: string }>(
+      fetchHermesJSON<{ events: Ev[] }>("/api/hermes/activity?take=40"),
+      fetchHermesJSON<{ tasks: Task[]; counts: Record<string, number>; total: number; lastSync: string }>(
         "/api/hermes/tasks"
       ),
-      getJSON<{ jobs: CronJob[]; syncedAt: string }>("/api/hermes/crons"),
+      fetchHermesJSON<{ jobs: CronJob[]; syncedAt: string }>("/api/hermes/crons"),
     ]);
-    if (h) setHealth(h);
-    if (reqs) {
-      setInbox(reqs.requests ?? []);
-      setPending(reqs.pending ?? reqs.requests?.length ?? 0);
+
+    const results = [reqs, act, tk, cr];
+    if (results.some((result) => result.status === "unavailable")) {
+      setUnavailable(true);
+      setLoadError(null);
+      setLoaded(true);
+      return;
     }
-    if (act) setEvents(act.events ?? []);
-    if (tk) {
-      setTasks(tk.tasks ?? []);
-      setTaskTotal(tk.total ?? tk.tasks?.length ?? 0);
-      setTaskSync(tk.lastSync ?? null);
+
+    const failed = results.find((result) => result.status === "error");
+    if (failed?.status === "error") {
+      setUnavailable(false);
+      setLoadError(failed.error.message);
+      setLoaded(true);
+      return;
     }
-    if (cr) {
-      setJobs(cr.jobs ?? []);
-      setCronSync(cr.syncedAt ?? null);
+
+    if (
+      reqs.status !== "ok" ||
+      act.status !== "ok" ||
+      tk.status !== "ok" ||
+      cr.status !== "ok"
+    ) {
+      return;
     }
+
+    setHealth(healthResult.data);
+    setInbox(reqs.data.requests ?? []);
+    setPending(reqs.data.pending ?? reqs.data.requests?.length ?? 0);
+    setEvents(act.data.events ?? []);
+    setTasks(tk.data.tasks ?? []);
+    setTaskTotal(tk.data.total ?? tk.data.tasks?.length ?? 0);
+    setTaskSync(tk.data.lastSync ?? null);
+    setJobs(cr.data.jobs ?? []);
+    setCronSync(cr.data.syncedAt ?? null);
+    setUnavailable(false);
+    setLoadError(null);
     setLoaded(true);
   }, []);
 
   useEffect(() => {
-    load();
+    const initial = setTimeout(load, 0);
     const iv = setInterval(load, 8000);
-    return () => clearInterval(iv);
+    return () => {
+      clearTimeout(initial);
+      clearInterval(iv);
+    };
   }, [load]);
 
   const manualRefresh = async () => {
     setRefreshing(true);
+    clearHermesUnavailableCooldown();
     await load();
     setRefreshing(false);
   };
@@ -812,15 +850,37 @@ export default function HermesPage() {
           </div>
         </div>
 
-        {/* Dispatch */}
-        <div className="hq-rise">
-          <DispatchBar onDone={load} />
-        </div>
+        {!loaded ? (
+          <Panel className="p-6">
+            <Skeleton className="h-20" />
+          </Panel>
+        ) : unavailable ? (
+          <Panel className="p-8">
+            <EmptyState
+              icon={<ActivityIcon className="w-6 h-6" />}
+              title="Hermes is not connected"
+              hint="The Hermes database or bridge is unavailable. No data is being inferred; connection checks will retry in the background."
+            />
+          </Panel>
+        ) : loadError ? (
+          <Panel className="p-8">
+            <EmptyState
+              icon={<ActivityIcon className="w-6 h-6" />}
+              title="Hermes failed to load"
+              hint={`${loadError}. This is an unexpected server error and will continue to be reported.`}
+            />
+          </Panel>
+        ) : (
+          <>
+            {/* Dispatch */}
+            <div className="hq-rise">
+              <DispatchBar onDone={load} />
+            </div>
 
-        {/* Dispatches — what you've sent Hermes + live status/results */}
-        <section className="mt-12">
-          <HermesDispatches />
-        </section>
+            {/* Dispatches — what you've sent Hermes + live status/results */}
+            <section className="mt-12">
+              <HermesDispatches />
+            </section>
 
         {/* Approval inbox */}
         <section className="mt-12">
@@ -900,10 +960,12 @@ export default function HermesPage() {
           )}
         </section>
 
-        {/* Observability — runs & usage */}
-        <section className="mt-12">
-          <HermesRuns />
-        </section>
+            {/* Observability — runs & usage */}
+            <section className="mt-12">
+              <HermesRuns />
+            </section>
+          </>
+        )}
       </div>
     </>
   );

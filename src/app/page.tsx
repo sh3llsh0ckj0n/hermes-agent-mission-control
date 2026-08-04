@@ -1,577 +1,475 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
-import { Twitter, Youtube, ArrowUpRight, ArrowDownRight, ChevronRight } from "lucide-react";
-import { MetricCard } from "@/components/ui/metric-card";
-import { Sparkline } from "@/components/sparkline";
-import { HermesBriefing } from "@/components/hermes-briefing";
-import { ApprovalInbox } from "@/components/approval-inbox";
+import Link from "next/link";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Activity,
+  ArrowRight,
+  CheckCircle2,
+  CircleDot,
+  Clock3,
+  Inbox,
+  ListChecks,
+  RefreshCw,
+  Server,
+  Sunrise,
+} from "lucide-react";
+import {
+  EmptyState,
+  Eyebrow,
+  Panel,
+  Pill,
+  SectionHeader,
+  Skeleton,
+} from "@/components/ui/kit";
+import {
+  briefingFallback,
+  collectionFallback,
+  deriveHermesStatus,
+  findCurrentTask,
+  summarizeTasks,
+  type BriefingData,
+  type HermesHealthData,
+  type HermesTaskData,
+} from "@/lib/dashboard";
 
-// ── Types ─────────────────────────────────────────────────
-interface HLPosition {
-  asset: string; direction: string; unrealizedPnl: number;
-  unrealizedPnlPct: number; leverage: number; stopLoss?: number; takeProfit?: number;
-}
-interface Tweet { id: string; text: string; views: number; engRate: number; postedAt: string | null; tweetUrl: string | null }
-interface Video  { title: string; thumbnail: string; url: string; publishedAt: string }
-interface Draft  { id: string; text: string }
-interface YTIdea { title: string; hook: string }
-interface BuildIdea { title: string; description: string; effort: string }
-interface Process { name: string; status: string; uptime: string }
-interface KanbanTask { id: string; title: string; assignee: string; status: string; priority: number }
-interface HermesKanban { board: string; slug: string; total: number; counts: Record<string, number>; tasks: KanbanTask[] }
-interface ScoreComponent { score: number; weight?: number; label: string; detail?: string }
-interface ScoreData { score: number; grade: string; label: string; color: string; period?: string; components: Record<string, ScoreComponent> }
-
-interface HomeData {
-  xFollowers: number; xGoal: number; xHandle: string;
-  topTweets: Tweet[]; topTweet: Tweet | null; xViewsThisWeek: number;
-  totalTweets: number; daysSincePost: number;
-  bestPostingDay: string; bestPostingHourStr: string;
-  topSageDrafts: Draft[];
-  topYoutubeIdeas: YTIdea[];
-  topBuildIdeas: BuildIdea[];
-  topVideo: Video | null; latestVideo: Video | null;
-  ytSubscribers: number; ytGoal: number;
-  polyBalance: number; polyWinRate: number; polyTodayPnl: number; polyAllTimePnl: number;
-  hlBalance: number; hlPosition: HLPosition | null; hlTodayPnl: number; hlAllTimePnl: number;
-  allTimePnl: number; todayPnl: number;
-  processes: Process[];
-  hermesKanban: HermesKanban;
-  xViewsTrend: number[];
-  snapshots: { d: string; xf: number; yt: number; pnl: number }[];
-}
-
-const EMPTY: HomeData = {
-  xFollowers: 0, xGoal: 100000, xHandle: "yourhandle",
-  topTweets: [], topTweet: null, xViewsThisWeek: 0, totalTweets: 0,
-  daysSincePost: 999, bestPostingDay: "—", bestPostingHourStr: "—",
-  topSageDrafts: [], topYoutubeIdeas: [], topBuildIdeas: [],
-  topVideo: null, latestVideo: null, ytSubscribers: 0, ytGoal: 20000,
-  polyBalance: 0, polyWinRate: 0, polyTodayPnl: 0, polyAllTimePnl: 0,
-  hlBalance: 0, hlPosition: null, hlTodayPnl: 0, hlAllTimePnl: 0,
-  allTimePnl: 0, todayPnl: 0, processes: [],
-  hermesKanban: { board: "Hermes 24/7 Assistant", slug: "hermes-24-7-assistant", total: 0, counts: {}, tasks: [] },
-  xViewsTrend: [], snapshots: [],
-};
-
-// ── Animated counter ──────────────────────────────────────
-function useCountUp(target: number, duration = 1400, enabled = true) {
-  const [val, setVal] = useState(0);
-  const raf = useRef<number | null>(null);
-  useEffect(() => {
-    const reduce = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    if (!enabled || target === 0 || reduce) { setVal(target); return; }
-    const start = Date.now();
-    const tick = () => {
-      const t = Math.min((Date.now() - start) / duration, 1);
-      const ease = 1 - Math.pow(1 - t, 4);
-      setVal(Math.round(target * ease));
-      if (t < 1) raf.current = requestAnimationFrame(tick);
-    };
-    raf.current = requestAnimationFrame(tick);
-    return () => { if (raf.current) cancelAnimationFrame(raf.current); };
-  }, [target, duration, enabled]);
-  return val;
+interface AgentRequestData {
+  id: string;
+  title: string;
+  kind: string;
+  status: string;
+  createdAt: string;
+  updatedAt?: string | null;
 }
 
-// ── Helpers ───────────────────────────────────────────────
-function fmt(n: number) {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
-  if (n >= 1_000) {
-    const k = Math.round(n / 1_000);
-    if (k >= 1000) return (n / 1_000_000).toFixed(1) + "M";
-    return k + "K";
-  }
-  return n.toString();
-}
-function fmtExact(n: number) { return n.toLocaleString("en-US"); }
-function fmtUsd(n: number, alwaysSign = false) {
-  const abs = Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const sign = n >= 0 ? (alwaysSign ? "+" : "") : "-";
-  return `${sign}$${abs}`;
-}
-function timeAgo(d: string) {
-  const diff = Date.now() - new Date(d).getTime();
-  const days = Math.floor(diff / 86400000);
-  const hrs  = Math.floor(diff / 3600000);
-  if (days > 0) return `${days}d ago`;
-  if (hrs  > 0) return `${hrs}h ago`;
-  return "just now";
-}
-function greeting() {
-  const h = new Date().getHours();
-  if (h < 12) return "Good morning";
-  if (h < 17) return "Good afternoon";
-  if (h < 21) return "Good evening";
-  return "Still up";
+interface AgentEventData {
+  id: string;
+  title: string;
+  kind: string;
+  level: string;
+  detail?: string | null;
+  createdAt: string;
 }
 
-// Local-dev preview only — never runs in production builds. Lets the full
-// card structure (delta + sparkline) show before real snapshot history exists.
-const DEV_PREVIEW = process.env.NODE_ENV !== "production";
-function sampleSeries(current: number, n: number) {
-  return Array.from({ length: n }, (_, i) => {
-    const ramp = 0.82 + (0.18 * i) / (n - 1);
-    const wobble = 1 + Math.sin(i * 1.3) * 0.03;
-    return Math.max(0, Math.round(current * ramp * wobble));
-  });
-}
-type Snap = { d: string; xf: number; yt: number; pnl: number };
-function snapDelta(snaps: Snap[], key: "xf" | "yt" | "pnl") {
-  const series = snaps.map(s => s[key]);
-  if (snaps.length < 2) return { delta: null as number | null, deltaPct: null as number | null, label: undefined as string | undefined, series };
-  const first = snaps[0][key];
-  const last = snaps[snaps.length - 1][key];
-  const delta = last - first;
-  const deltaPct = first !== 0 ? (delta / Math.abs(first)) * 100 : 0;
-  return { delta, deltaPct, label: `${snaps.length - 1}d`, series };
-}
-function withDevPreview(d: { delta: number | null; deltaPct: number | null; label?: string; series: number[] }, current: number) {
-  if (!DEV_PREVIEW || d.series.length >= 2) return d;
-  const series = sampleSeries(current, 12);
-  const first = series[0], last = series[series.length - 1];
-  return { delta: last - first, deltaPct: first ? ((last - first) / first) * 100 : 0, label: "sample", series };
+interface CronData {
+  id: string;
+  name: string;
+  status: string;
+  schedule: string;
+  lastRun: string | null;
+  lastResult: string | null;
+  nextRun: string | null;
 }
 
-// ── Section header ────────────────────────────────────────
-function SectionLabel({ children, right }: { children: React.ReactNode; right?: React.ReactNode }) {
-  return (
-    <div className="flex items-center gap-3 mb-3">
-      <span className="eyebrow">{children}</span>
-      <span className="h-px flex-1 bg-[var(--hq-hairline)]" />
-      {right}
-    </div>
-  );
+interface Resource<T> {
+  data: T | null;
+  connected: boolean;
+  loaded: boolean;
 }
 
-// ── Ideas section ─────────────────────────────────────────
-type IdeaTab = "x" | "youtube" | "builds";
-function IdeasPanel({ sageDrafts, ytIdeas, buildIdeas }: {
-  sageDrafts: Draft[]; ytIdeas: YTIdea[]; buildIdeas: BuildIdea[];
-}) {
-  const [tab, setTab] = useState<IdeaTab>("x");
-  const tabs: { key: IdeaTab; label: string; count: number }[] = [
-    { key: "x", label: "X", count: sageDrafts.length },
-    { key: "youtube", label: "YouTube", count: ytIdeas.length },
-    { key: "builds", label: "Builds", count: buildIdeas.length },
-  ];
-
-  return (
-    <div className="panel flex flex-col p-6 h-full">
-      <div className="flex items-center justify-between mb-4">
-        <span className="eyebrow">Top Ideas</span>
-        <div className="flex gap-1 rounded-lg border border-[var(--hq-hairline)] p-0.5">
-          {tabs.map(t => (
-            <button
-              key={t.key}
-              onClick={() => setTab(t.key)}
-              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
-                tab === t.key ? "bg-white/[0.08] text-[var(--hq-text)]" : "text-[var(--hq-text-ghost)] hover:text-[var(--hq-text-dim)]"
-              }`}
-            >
-              {t.label}
-              {t.count > 0 && <span className="ml-1 num text-[var(--hq-text-ghost)]">{t.count}</span>}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="space-y-1 min-h-[172px]">
-        {tab === "x" && (sageDrafts.length > 0 ? sageDrafts.map((d, i) => (
-          <a key={d.id} href="/x-content" className="group flex gap-3 items-center py-2 border-b border-[var(--hq-hairline)] last:border-0 hover:opacity-100 transition-opacity">
-            <span className="num text-[11px] text-[var(--hq-text-ghost)] w-5 shrink-0">{String(i + 1).padStart(2, "0")}</span>
-            <p className="text-[var(--hq-text-dim)] text-[13px] leading-snug line-clamp-1 flex-1 group-hover:text-[var(--hq-text)] transition-colors">{d.text}</p>
-            <ChevronRight className="w-3.5 h-3.5 text-[var(--hq-text-ghost)] group-hover:text-[var(--hq-text-dim)] shrink-0 transition-all group-hover:translate-x-0.5" />
-          </a>
-        )) : <Empty>No pending drafts.</Empty>)}
-
-        {tab === "youtube" && (ytIdeas.length > 0 ? ytIdeas.map((it, idx) => (
-          <a key={idx} href="/youtube" className="group flex gap-3 items-center py-2 border-b border-[var(--hq-hairline)] last:border-0">
-            <span className="num text-[11px] text-[var(--hq-text-ghost)] w-5 shrink-0">{String(idx + 1).padStart(2, "0")}</span>
-            <p className="text-[var(--hq-text-dim)] text-[13px] font-medium line-clamp-1 flex-1 group-hover:text-[var(--hq-text)] transition-colors">{it.title}</p>
-            <ChevronRight className="w-3.5 h-3.5 text-[var(--hq-text-ghost)] group-hover:text-[var(--hq-text-dim)] shrink-0 transition-all group-hover:translate-x-0.5" />
-          </a>
-        )) : <Empty>No YouTube ideas yet.</Empty>)}
-
-        {tab === "builds" && (buildIdeas.length > 0 ? buildIdeas.map((it, idx) => (
-          <div key={idx} className="flex gap-3 items-center py-2 border-b border-[var(--hq-hairline)] last:border-0">
-            <span className="num text-[11px] text-[var(--hq-text-ghost)] w-5 shrink-0">{String(idx + 1).padStart(2, "0")}</span>
-            <p className="text-[var(--hq-text-dim)] text-[13px] font-medium line-clamp-1 flex-1">{it.title}</p>
-            <span className="text-[10px] px-1.5 py-0.5 rounded-md num border shrink-0"
-              style={it.effort === "quick win"
-                ? { color: "var(--hq-up)", borderColor: "rgba(52,211,153,0.25)", background: "rgba(52,211,153,0.08)" }
-                : it.effort === "large"
-                ? { color: "var(--hq-down)", borderColor: "rgba(251,113,133,0.25)", background: "rgba(251,113,133,0.08)" }
-                : { color: "var(--hq-warn)", borderColor: "rgba(251,191,36,0.25)", background: "rgba(251,191,36,0.08)" }}>
-              {it.effort}
-            </span>
-          </div>
-        )) : <Empty>No build ideas yet.</Empty>)}
-      </div>
-    </div>
-  );
+interface DashboardResources {
+  health: Resource<HermesHealthData>;
+  requests: Resource<{ requests: AgentRequestData[]; pending: number }>;
+  events: Resource<{ events: AgentEventData[] }>;
+  tasks: Resource<{ tasks: HermesTaskData[]; total: number; lastSync: string | null }>;
+  crons: Resource<{ jobs: CronData[]; syncedAt: string | null }>;
+  briefing: Resource<BriefingData>;
 }
 
-function Empty({ children }: { children: React.ReactNode }) {
-  return <p className="text-[var(--hq-text-ghost)] text-[13px] py-8 text-center">{children}</p>;
+interface ActivityRow {
+  id: string;
+  title: string;
+  detail: string;
+  status: string;
+  createdAt: string;
 }
 
-// ── Top tweets ────────────────────────────────────────────
-function TopTweetsPanel({ tweets }: { tweets: Tweet[] }) {
-  return (
-    <div className="panel flex flex-col p-6 h-full">
-      <div className="flex items-center gap-2 mb-4">
-        <Twitter className="w-3.5 h-3.5" style={{ color: "#38bdf8" }} />
-        <span className="eyebrow">Top Tweets · 7d</span>
-      </div>
-      {tweets.length === 0 ? <Empty>No tweet data yet</Empty> : (
-        <div className="space-y-0">
-          {tweets.slice(0, 3).map((t, i) => (
-            <a key={t.id} href={t.tweetUrl || "/x"} target="_blank" rel="noreferrer"
-              className="group flex gap-3 py-3 border-b border-[var(--hq-hairline)] last:border-0">
-              <span className="num text-[11px] text-[var(--hq-text-ghost)] w-5 shrink-0 mt-0.5">{String(i + 1).padStart(2, "0")}</span>
-              <div className="flex-1 min-w-0">
-                {t.text
-                  ? <p className="text-[var(--hq-text-dim)] text-[13px] leading-snug line-clamp-2 mb-1.5 group-hover:text-[var(--hq-text)] transition-colors">{t.text}</p>
-                  : <p className="text-[var(--hq-text-ghost)] text-[13px] italic mb-1.5">External tweet</p>}
-                <div className="flex items-center gap-3 text-[11px] num">
-                  <span className="text-[var(--hq-text)] font-semibold">{fmt(t.views)}<span className="text-[var(--hq-text-ghost)] font-normal"> views</span></span>
-                  <span className="text-[var(--hq-text-faint)]">{t.engRate.toFixed(1)}% eng</span>
-                  {t.postedAt && <span className="text-[var(--hq-text-ghost)]">{timeAgo(t.postedAt)}</span>}
-                </div>
-              </div>
-              <ArrowUpRight className="w-3.5 h-3.5 text-[var(--hq-text-ghost)] group-hover:text-[var(--hq-text-dim)] shrink-0 mt-0.5 transition-all group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
-            </a>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
+const EMPTY_RESOURCE = { data: null, connected: false, loaded: false } as const;
 
-// ── X analytics panel ─────────────────────────────────────
-function XAnalyticsPanel({ views, trend, totalTweets, bestDay, bestHour }: {
-  views: number; trend: number[]; totalTweets: number; bestDay: string; bestHour: string;
-}) {
-  return (
-    <div className="panel flex flex-col p-6 h-full">
-      <div className="flex items-center gap-2 mb-4">
-        <Twitter className="w-3.5 h-3.5" style={{ color: "#38bdf8" }} />
-        <span className="eyebrow">X Analytics</span>
-      </div>
-      <div className="space-y-4">
-        <div>
-          <div className="eyebrow mb-2 !text-[9.5px]">Views · 7d</div>
-          <div className="num font-semibold text-[40px] leading-[0.95] tracking-[-0.02em] text-[var(--hq-text)]">{fmt(views)}</div>
-          {trend.some(v => v > 0) && <Sparkline data={trend} color="#38bdf8" area idSeed="xviews" className="h-9 mt-3" />}
-        </div>
-        <div className="grid grid-cols-2 gap-3 pt-1">
-          <div>
-            <div className="eyebrow mb-1.5 !text-[9.5px]">Tracked</div>
-            <div className="num font-semibold text-[18px] text-[var(--hq-text)]">{fmtExact(totalTweets)}</div>
-          </div>
-          <div>
-            <div className="eyebrow mb-1.5 !text-[9.5px]">Best window</div>
-            <div className="text-[13px] font-medium text-[var(--hq-text-dim)]">{bestDay}<span className="num"> · {bestHour}</span></div>
-          </div>
-        </div>
-      </div>
-      <a href="/x" className="mt-auto pt-4 flex items-center gap-1 text-[var(--hq-text-faint)] text-[11px] font-medium hover:text-[var(--hq-text-dim)] transition-colors group">
-        Open X dashboard <ArrowUpRight className="w-3 h-3 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
-      </a>
-    </div>
-  );
-}
-
-// ── YouTube ───────────────────────────────────────────────
-function YouTubeCard({ video, label }: { video: Video; label: string }) {
-  return (
-    <a href={video.url} target="_blank" rel="noreferrer" className="panel panel-interactive group flex flex-col overflow-hidden">
-      {video.thumbnail && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={video.thumbnail} alt={video.title} className="w-full aspect-video object-cover opacity-75 group-hover:opacity-100 transition-opacity" />
-      )}
-      <div className="p-4">
-        <div className="eyebrow mb-2" style={{ color: "#f87171" }}>{label}</div>
-        <p className="text-[var(--hq-text-dim)] text-[13px] font-medium line-clamp-2 leading-snug group-hover:text-[var(--hq-text)] transition-colors">{video.title}</p>
-        {video.publishedAt && <p className="num text-[var(--hq-text-ghost)] text-[11px] mt-2">{timeAgo(video.publishedAt)}</p>}
-      </div>
-    </a>
-  );
-}
-
-// ── YouTube: Top Performing vs Latest (tabbed) ────────────
-function YouTubeVideoTabs({ topVideo, latestVideo }: { topVideo: Video | null; latestVideo: Video | null }) {
-  const [tab, setTab] = useState<"top" | "latest">("top");
-  const video = tab === "top" ? (topVideo ?? latestVideo) : (latestVideo ?? topVideo);
-  if (!video) return null;
-  const Btn = ({ k, label }: { k: "top" | "latest"; label: string }) => (
-    <button
-      onClick={() => setTab(k)}
-      className={`px-3 py-1.5 rounded-md text-[11px] font-medium transition-colors ${
-        tab === k ? "bg-white/[0.08] text-[var(--hq-text)]" : "text-[var(--hq-text-ghost)] hover:text-[var(--hq-text-dim)]"
-      }`}
-    >
-      {label}
-    </button>
-  );
-  return (
-    <div className="panel flex flex-col overflow-hidden">
-      <div className="flex items-center gap-1 p-2 border-b border-[var(--hq-hairline)]">
-        <span className="eyebrow ml-2 mr-1" style={{ color: "#f87171" }}>YouTube</span>
-        <Btn k="top" label="Top Performing" />
-        <Btn k="latest" label="Latest" />
-      </div>
-      <a href={video.url} target="_blank" rel="noreferrer" className="group block">
-        {video.thumbnail && (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={video.thumbnail} alt={video.title} className="w-full aspect-video object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
-        )}
-        <div className="p-4">
-          <p className="text-[var(--hq-text-dim)] text-[13px] font-medium line-clamp-2 leading-snug group-hover:text-[var(--hq-text)] transition-colors">{video.title}</p>
-          {video.publishedAt && <p className="num text-[var(--hq-text-ghost)] text-[11px] mt-2">{timeAgo(video.publishedAt)}</p>}
-        </div>
-      </a>
-    </div>
-  );
-}
-
-// ── Agents strip ──────────────────────────────────────────
-function AgentsStrip({ processes }: { processes: Process[] }) {
-  if (processes.length === 0) return null;
-  return (
-    <div className="flex items-center gap-2 flex-wrap">
-      <span className="eyebrow mr-1">System</span>
-      {processes.map((p, i) => (
-        <div key={i} className="flex items-center gap-1.5 rounded-lg border border-[var(--hq-hairline)] bg-white/[0.02] px-2.5 py-1.5">
-          <span className="relative flex w-1.5 h-1.5">
-            {p.status === "online" && <span className="absolute inline-flex h-full w-full rounded-full animate-ping" style={{ background: "color-mix(in srgb, var(--up) 60%, transparent)" }} />}
-            <span className="relative inline-flex w-1.5 h-1.5 rounded-full" style={{ background: p.status === "online" ? "var(--up)" : "var(--down)" }} />
-          </span>
-          <span className="text-[var(--hq-text-dim)] text-[12px]">{p.name}</span>
-          <span className="num text-[var(--hq-text-ghost)] text-[10px]">{p.uptime}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ── Hermes Kanban ─────────────────────────────────────────
-function HermesKanbanPanel({ kanban }: { kanban: HermesKanban }) {
-  const statusColor = (s: string) => {
-    const k = s.toLowerCase();
-    if (k.includes("done") || k.includes("complete")) return "var(--hq-up)";
-    if (k.includes("progress") || k.includes("doing")) return "var(--accent)";
-    if (k.includes("block")) return "var(--hq-down)";
-    return "var(--hq-text-faint)";
+function initialResources(): DashboardResources {
+  return {
+    health: { ...EMPTY_RESOURCE },
+    requests: { ...EMPTY_RESOURCE },
+    events: { ...EMPTY_RESOURCE },
+    tasks: { ...EMPTY_RESOURCE },
+    crons: { ...EMPTY_RESOURCE },
+    briefing: { ...EMPTY_RESOURCE },
   };
-  const entries = Object.entries(kanban.counts || {});
-  return (
-    <div className="panel flex flex-col p-6 h-full">
-      <div className="flex items-center justify-between mb-4">
-        <div className="min-w-0">
-          <span className="eyebrow">Hermes Board</span>
-          <p className="text-[13px] text-[var(--hq-text-dim)] truncate mt-1">{kanban.board}</p>
-        </div>
-        <span className="num text-[22px] font-semibold text-[var(--hq-text)] shrink-0">{kanban.total}</span>
-      </div>
-
-      {entries.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 mb-4">
-          {entries.map(([status, count]) => (
-            <span key={status} className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium num"
-              style={{ color: statusColor(status), background: `color-mix(in srgb, ${statusColor(status)} 12%, transparent)`, border: `1px solid color-mix(in srgb, ${statusColor(status)} 22%, transparent)` }}>
-              {status} {count}
-            </span>
-          ))}
-        </div>
-      )}
-
-      {kanban.tasks.length === 0 ? <Empty>No active tasks.</Empty> : (
-        <div className="space-y-0">
-          {kanban.tasks.slice(0, 5).map((t) => (
-            <div key={t.id} className="flex items-center gap-3 py-2.5 border-b border-[var(--hq-hairline)] last:border-0">
-              <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: statusColor(t.status) }} />
-              <p className="text-[13px] text-[var(--hq-text-dim)] leading-snug line-clamp-1 flex-1">{t.title}</p>
-              {t.assignee && <span className="num text-[10.5px] text-[var(--hq-text-ghost)] shrink-0">{t.assignee}</span>}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
 }
 
-// ── Momentum Score gauge (dashboard hero) ─────────────────
-function ScoreGauge({ score }: { score: ScoreData }) {
-  const tier = score.score >= 80 ? "var(--hq-up)" : score.score >= 60 ? "var(--hq-warn)" : "var(--hq-down)";
-  const counted = useCountUp(score.score, 1400, true);
-  const R = 50, C = 2 * Math.PI * R;
-  const pct = Math.min(100, Math.max(0, counted));
-  const comps = Object.entries(score.components || {}).slice(0, 4);
-  return (
-    <div className="flex items-center gap-5">
-      <div className="relative w-[112px] h-[112px] shrink-0">
-        <svg viewBox="0 0 120 120" className="w-full h-full -rotate-90">
-          <circle cx="60" cy="60" r="50" fill="none" stroke="var(--hq-hairline)" strokeWidth="6" />
-          <circle cx="60" cy="60" r="50" fill="none" stroke={tier} strokeWidth="6" strokeLinecap="round"
-            strokeDasharray={`${(C * pct) / 100} ${C}`} style={{ transition: "stroke-dasharray 0.5s var(--ease)" }} />
-        </svg>
-        <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <span className="num font-semibold text-[32px] leading-none tracking-[-0.02em]" style={{ color: tier }}>{Math.round(counted)}</span>
-          <span className="num text-[10.5px] text-[var(--hq-text-ghost)] mt-1">{score.grade}</span>
-        </div>
-      </div>
-      <div className="hidden sm:block w-[176px]">
-        <div className="eyebrow !text-[9.5px]">Momentum</div>
-        <div className="text-[14px] font-semibold mt-0.5 mb-2.5" style={{ color: tier }}>{score.label}</div>
-        <div className="space-y-[7px]">
-          {comps.map(([k, c]) => {
-            const cc = c.score >= 80 ? "var(--hq-up)" : c.score >= 40 ? "var(--hq-warn)" : "var(--hq-down)";
-            return (
-              <div key={k} className="flex items-center gap-2">
-                <span className="num text-[9.5px] text-[var(--hq-text-ghost)] w-14 truncate">{c.label.split(" ")[0]}</span>
-                <div className="h-[3px] flex-1 rounded-full bg-white/[0.06] overflow-hidden">
-                  <div className="h-full rounded-full" style={{ width: `${c.score}%`, background: cc, opacity: 0.85, transition: "width 1s var(--ease)" }} />
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
+async function fetchResource<T>(url: string): Promise<Resource<T>> {
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) return { data: null, connected: false, loaded: true };
+    return { data: (await response.json()) as T, connected: true, loaded: true };
+  } catch {
+    return { data: null, connected: false, loaded: true };
+  }
 }
 
-// ── Main ──────────────────────────────────────────────────
+function formatRelative(value: string | null | undefined): string {
+  if (!value) return "No data yet";
+  const timestamp = new Date(value).getTime();
+  if (Number.isNaN(timestamp)) return "No data yet";
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 45) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function statusTone(status: string): "neutral" | "up" | "down" | "warn" | "accent" {
+  const normalized = status.toLowerCase();
+  if (normalized.includes("done") || normalized === "up" || normalized.includes("complete")) return "up";
+  if (normalized.includes("fail") || normalized === "down" || normalized.includes("reject")) return "down";
+  if (normalized.includes("approval") || normalized.includes("block") || normalized === "warn") return "warn";
+  if (normalized.includes("run") || normalized.includes("active") || normalized.includes("queue")) return "accent";
+  return "neutral";
+}
+
+function mostRecent(values: Array<string | null | undefined>): string | null {
+  const valid = values
+    .filter((value): value is string => Boolean(value && !Number.isNaN(new Date(value).getTime())))
+    .sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
+  return valid[0] ?? null;
+}
+
 export default function Dashboard() {
-  const [data, setData] = useState<HomeData>(EMPTY);
-  const [time, setTime] = useState(new Date());
-  const [loaded, setLoaded] = useState(false);
-  const [mounted, setMounted] = useState(false);
-  const [score, setScore] = useState<ScoreData | null>(null);
+  const [resources, setResources] = useState<DashboardResources>(initialResources);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
 
-  useEffect(() => { setMounted(true); }, []);
-  useEffect(() => {
-    fetch("/api/score").then(r => r.ok ? r.json() : null).then(d => { if (d) setScore(d); }).catch(() => {});
-  }, []);
-  useEffect(() => {
-    const t = setInterval(() => setTime(new Date()), 1000);
-    return () => clearInterval(t);
-  }, []);
-  useEffect(() => {
-    fetch("/api/home")
-      .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d) { setData(d); setTimeout(() => setLoaded(true), 100); } })
-      .catch(() => {});
-    const iv = setInterval(() => {
-      fetch("/api/home").then(r => r.ok ? r.json() : null).then(d => { if (d) setData(d); }).catch(() => {});
-    }, 60_000);
-    return () => clearInterval(iv);
+  const load = useCallback(async () => {
+    const [health, requests, events, tasks, crons, briefing] = await Promise.all([
+      fetchResource<HermesHealthData>("/api/hermes/health"),
+      fetchResource<{ requests: AgentRequestData[]; pending: number }>("/api/hermes/requests?take=8"),
+      fetchResource<{ events: AgentEventData[] }>("/api/hermes/activity?take=8"),
+      fetchResource<{ tasks: HermesTaskData[]; total: number; lastSync: string | null }>("/api/hermes/tasks"),
+      fetchResource<{ jobs: CronData[]; syncedAt: string | null }>("/api/hermes/crons"),
+      fetchResource<BriefingData>("/api/hermes/briefing"),
+    ]);
+    setResources({ health, requests, events, tasks, crons, briefing });
+    setRefreshedAt(new Date().toISOString());
   }, []);
 
-  if (!mounted) return null;
+  useEffect(() => {
+    const initial = window.setTimeout(() => void load(), 0);
+    const interval = window.setInterval(() => void load(), 15_000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(interval);
+    };
+  }, [load]);
 
-  const xd = withDevPreview(snapDelta(data.snapshots, "xf"), data.xFollowers);
-  const ytd = withDevPreview(snapDelta(data.snapshots, "yt"), data.ytSubscribers);
-  const xViewsSeries = DEV_PREVIEW && !data.xViewsTrend.some(v => v > 0)
-    ? sampleSeries(data.xViewsThisWeek || 42000, 14)
-    : data.xViewsTrend;
+  const refresh = async () => {
+    setRefreshing(true);
+    await load();
+    setRefreshing(false);
+  };
 
-  const stale = data.daysSincePost > 3 && data.daysSincePost < 999;
-  const rise = (i: number) => ({ animationDelay: `${i * 60}ms` });
+  const healthView = deriveHermesStatus(resources.health.data, resources.health.connected);
+  const tasks = resources.tasks.data?.tasks ?? [];
+  const taskSummary = summarizeTasks(tasks);
+  const currentTask = findCurrentTask(resources.health.data, tasks);
+  const requests = useMemo(
+    () => resources.requests.data?.requests ?? [],
+    [resources.requests.data?.requests],
+  );
+  const events = useMemo(
+    () => resources.events.data?.events ?? [],
+    [resources.events.data?.events],
+  );
+  const pendingApprovals = resources.requests.data?.pending ?? null;
+  const cronJobs = resources.crons.data?.jobs ?? [];
+  const activeCrons = cronJobs.filter((job) => job.status.toLowerCase() === "active").length;
+
+  const recentActivity = useMemo<ActivityRow[]>(() => {
+    const requestRows = requests.map((request) => ({
+      id: `request-${request.id}`,
+      title: request.title,
+      detail: request.kind,
+      status: request.status,
+      createdAt: request.updatedAt ?? request.createdAt,
+    }));
+    const eventRows = events.map((event) => ({
+      id: `event-${event.id}`,
+      title: event.title,
+      detail: event.detail ?? event.kind,
+      status: event.level,
+      createdAt: event.createdAt,
+    }));
+    return [...requestRows, ...eventRows]
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, 8);
+  }, [events, requests]);
+
+  const lastActivity = mostRecent([
+    resources.health.data?.lastSeen,
+    ...requests.map((request) => request.updatedAt ?? request.createdAt),
+    ...events.map((event) => event.createdAt),
+  ]);
+  const recentFallback = collectionFallback({
+    connected: resources.requests.connected || resources.events.connected,
+    hasData: recentActivity.length > 0,
+  });
+  const taskFallback = collectionFallback({
+    connected: resources.tasks.connected,
+    hasData: tasks.length > 0,
+    bridgeReported: Boolean(resources.tasks.data?.lastSync),
+  });
+  const cronFallback = collectionFallback({
+    connected: resources.crons.connected,
+    hasData: cronJobs.length > 0,
+    bridgeReported: Boolean(resources.crons.data?.syncedAt),
+  });
+  const briefingMessage = briefingFallback(resources.briefing.data, resources.briefing.connected);
+  const healthLoaded = resources.health.loaded;
+  const allLoaded = Object.values(resources).every((resource) => resource.loaded);
+  const operatorName = process.env.NEXT_PUBLIC_OWNER_NAME?.trim() || "Operator";
 
   return (
-    <>
-      <div className="relative z-10 w-full mx-auto pb-16">
+    <div className="relative z-10 w-full mx-auto pb-16">
+      <header className="hq-rise pt-4 pb-10 flex flex-wrap items-end justify-between gap-6">
+        <div>
+          <Eyebrow>Operational overview</Eyebrow>
+          <h1 className="mt-2.5 text-[40px] font-semibold tracking-[-0.025em] leading-none text-[var(--text)]">
+            Mission Control
+          </h1>
+          <p className="mt-3 text-[13px] text-[var(--text-3)]">
+            Operator: <span className="text-[var(--text-2)]">{operatorName}</span>
+            {refreshedAt && <span className="num"> · refreshed {formatRelative(refreshedAt)}</span>}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={refresh}
+          disabled={refreshing}
+          aria-label="Refresh operational data"
+          className="btn-ghost inline-flex items-center gap-2 px-4 py-2 text-[12px] disabled:opacity-50"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? "animate-spin" : ""}`} />
+          Refresh
+        </button>
+      </header>
 
-        {/* ── Header ─────────────────────────────────────── */}
-        <div className="hq-rise pt-4 pb-10 flex flex-wrap items-end justify-between gap-6" style={rise(0)}>
-          <div>
-            <div className="eyebrow mb-2.5">{greeting()}</div>
-            <h1 className="text-[40px] font-semibold tracking-[-0.025em] leading-none text-[var(--hq-text)]">{process.env.NEXT_PUBLIC_OWNER_NAME || "Founder"}</h1>
-            <p className="num text-[var(--hq-text-ghost)] text-[12.5px] mt-3">
-              {time.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
-              {"  ·  "}
-              {time.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}
-            </p>
-          </div>
-          <div className="flex flex-col items-end gap-4">
-            <div className="flex items-center gap-2.5">
-              {data.daysSincePost < 999 && (
-                <div className="flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium"
-                  style={stale
-                    ? { color: "var(--hq-warn)", borderColor: "rgba(251,191,36,0.22)", background: "rgba(251,191,36,0.07)" }
-                    : { color: "var(--hq-up)", borderColor: "rgba(52,211,153,0.22)", background: "rgba(52,211,153,0.07)" }}>
-                  <span className="num">{data.daysSincePost === 0 ? "Posted today" : `${data.daysSincePost}d since post`}</span>
+      <section aria-labelledby="status-heading">
+        <SectionHeader label="Now" title={<span id="status-heading">Hermes status</span>} />
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {!healthLoaded ? (
+            <Skeleton className="h-44" />
+          ) : (
+            <Panel className="p-6 min-h-44">
+              <div className="flex items-center justify-between gap-3">
+                <Eyebrow>Runtime</Eyebrow>
+                <Pill tone={healthView.status === "online" ? "up" : healthView.status === "offline" ? "down" : "neutral"}>
+                  <CircleDot className="w-3 h-3" />
+                  {healthView.label}
+                </Pill>
+              </div>
+              <p className="mt-5 text-[14px] text-[var(--text-2)]">{healthView.detail}</p>
+              <p className="mt-2 num text-[11px] text-[var(--text-3)]">
+                Last activity: {lastActivity ? formatRelative(lastActivity) : "No data yet"}
+              </p>
+              <div className="mt-5 pt-4 border-t border-[var(--line)]">
+                <p className="eyebrow !text-[9.5px]">Current task</p>
+                <p className="mt-1.5 text-[13px] text-[var(--text-2)] line-clamp-2">
+                  {currentTask ?? (resources.tasks.connected ? "No data yet" : "Not connected")}
+                </p>
+              </div>
+            </Panel>
+          )}
+
+          {!resources.requests.loaded ? (
+            <Skeleton className="h-44" />
+          ) : (
+            <Panel className="p-6 min-h-44">
+              <div className="flex items-center justify-between gap-3">
+                <Eyebrow>Approval queue</Eyebrow>
+                <Inbox className="w-4 h-4 text-[var(--warn)]" />
+              </div>
+              {resources.requests.connected ? (
+                <>
+                  <p className="num mt-5 text-[46px] leading-none font-semibold text-[var(--text)]">
+                    {pendingApprovals ?? 0}
+                  </p>
+                  <p className="mt-2 text-[13px] text-[var(--text-3)]">awaiting approval</p>
+                </>
+              ) : (
+                <p className="mt-7 text-[14px] text-[var(--text-2)]">Not connected</p>
+              )}
+              <Link href="/hermes" className="mt-5 inline-flex items-center gap-1.5 text-[12px] text-[var(--accent)]">
+                Open approval inbox <ArrowRight className="w-3 h-3" />
+              </Link>
+            </Panel>
+          )}
+
+          {!resources.tasks.loaded ? (
+            <Skeleton className="h-44" />
+          ) : (
+            <Panel className="p-6 min-h-44">
+              <div className="flex items-center justify-between gap-3">
+                <Eyebrow>Task overview</Eyebrow>
+                <ListChecks className="w-4 h-4 text-[var(--accent)]" />
+              </div>
+              {taskFallback ? (
+                <p className="mt-7 text-[14px] text-[var(--text-2)]">{taskFallback}</p>
+              ) : (
+                <div className="grid grid-cols-3 gap-3 mt-6">
+                  {[
+                    ["To do", taskSummary.todo],
+                    ["Active", taskSummary.active],
+                    ["Done", taskSummary.completed],
+                  ].map(([label, count]) => (
+                    <div key={label} className="min-w-0">
+                      <p className="num text-[25px] font-semibold text-[var(--text)]">{count}</p>
+                      <p className="mt-1 text-[10.5px] text-[var(--text-3)]">{label}</p>
+                    </div>
+                  ))}
                 </div>
               )}
-              <div className="flex items-center gap-1.5 rounded-full border border-[var(--hq-hairline)] bg-white/[0.02] px-2.5 py-1">
-                <span className="relative flex w-1.5 h-1.5">
-                  <span className="absolute inline-flex h-full w-full rounded-full animate-ping" style={{ background: "color-mix(in srgb, var(--up) 60%, transparent)" }} />
-                  <span className="relative inline-flex w-1.5 h-1.5 rounded-full" style={{ background: "var(--up)" }} />
-                </span>
-                <span className="eyebrow !text-[9.5px] !text-[var(--hq-text-faint)]">Live</span>
-              </div>
-            </div>
-            {score && <ScoreGauge score={score} />}
-          </div>
+              <Link href="/tasks" className="mt-5 inline-flex items-center gap-1.5 text-[12px] text-[var(--accent)]">
+                Open task board <ArrowRight className="w-3 h-3" />
+              </Link>
+            </Panel>
+          )}
         </div>
+      </section>
 
-        {/* ── Platform stacks: X (with analytics) · YouTube (with video) ─ */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 items-start">
-          {/* X */}
-          <div className="flex flex-col gap-5 hq-rise" style={rise(1)}>
-            <MetricCard
-              label="X Followers" value={data.xFollowers} format={fmtExact}
-              delta={xd.delta} deltaPct={xd.deltaPct} deltaLabel={xd.label} trend={xd.series}
-              goal={data.xGoal} goalFormat={fmt}
-              icon={<Twitter className="w-4 h-4" />} accent="#38bdf8" href="/x" loaded={loaded}
-            />
-            <XAnalyticsPanel views={data.xViewsThisWeek} trend={xViewsSeries} totalTweets={data.totalTweets} bestDay={data.bestPostingDay} bestHour={data.bestPostingHourStr} />
-          </div>
-          {/* YouTube */}
-          <div className="flex flex-col gap-5 hq-rise" style={rise(2)}>
-            <MetricCard
-              label="YouTube Subscribers" value={data.ytSubscribers} format={fmtExact}
-              delta={ytd.delta} deltaPct={ytd.deltaPct} deltaLabel={ytd.label} trend={ytd.series}
-              goal={data.ytGoal} goalFormat={fmt}
-              icon={<Youtube className="w-4 h-4" />} accent="#f87171" href="/youtube" loaded={loaded}
-            />
-            {(data.topVideo || data.latestVideo) && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                {data.topVideo && <YouTubeCard video={data.topVideo} label="Top Performing" />}
-                {data.latestVideo && <YouTubeCard video={data.latestVideo} label="Latest" />}
+      <section className="mt-12" aria-labelledby="runs-heading">
+        <SectionHeader label="Activity" title={<span id="runs-heading">Recent runs</span>} />
+        {!resources.requests.loaded || !resources.events.loaded ? (
+          <Skeleton className="h-64" />
+        ) : recentFallback ? (
+          <Panel className="p-2">
+            <EmptyState icon={<Activity className="w-6 h-6" />} title={recentFallback} />
+          </Panel>
+        ) : (
+          <Panel className="overflow-hidden">
+            <div className="divide-y divide-[var(--line)]">
+              {recentActivity.map((item) => (
+                <div key={item.id} className="flex items-start gap-4 px-5 py-4">
+                  <Clock3 className="w-4 h-4 text-[var(--text-3)] mt-0.5 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[13.5px] font-medium text-[var(--text)] truncate">{item.title}</p>
+                    <p className="mt-1 text-[12px] text-[var(--text-3)] line-clamp-1">{item.detail}</p>
+                  </div>
+                  <div className="flex flex-col items-end gap-1.5 shrink-0">
+                    <Pill tone={statusTone(item.status)}>{item.status}</Pill>
+                    <span className="num text-[10px] text-[var(--text-3)]">{formatRelative(item.createdAt)}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Panel>
+        )}
+      </section>
+
+      <section className="mt-12" aria-labelledby="health-heading">
+        <SectionHeader label="Operations" title={<span id="health-heading">Health and cron summary</span>} />
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {!resources.health.loaded ? (
+            <Skeleton className="h-52" />
+          ) : (
+            <Panel className="p-6 min-h-52">
+              <div className="flex items-center gap-2">
+                <Server className="w-4 h-4 text-[var(--accent)]" />
+                <Eyebrow>Bridge health</Eyebrow>
+              </div>
+              <p className="mt-6 text-[19px] font-semibold text-[var(--text)]">{healthView.label}</p>
+              <p className="mt-2 text-[13px] text-[var(--text-2)]">{healthView.detail}</p>
+              <p className="mt-5 num text-[11px] text-[var(--text-3)]">
+                Last report: {resources.health.data?.lastSeen ? formatRelative(resources.health.data.lastSeen) : healthView.detail}
+              </p>
+            </Panel>
+          )}
+
+          {!resources.crons.loaded ? (
+            <Skeleton className="h-52" />
+          ) : (
+            <Panel className="p-6 min-h-52">
+              <div className="flex items-center gap-2">
+                <Clock3 className="w-4 h-4 text-[var(--accent)]" />
+                <Eyebrow>Schedules</Eyebrow>
+              </div>
+              {cronFallback ? (
+                <p className="mt-8 text-[14px] text-[var(--text-2)]">{cronFallback}</p>
+              ) : (
+                <>
+                  <div className="grid grid-cols-2 gap-4 mt-6">
+                    <div>
+                      <p className="num text-[30px] font-semibold text-[var(--text)]">{activeCrons}</p>
+                      <p className="mt-1 text-[11px] text-[var(--text-3)]">active</p>
+                    </div>
+                    <div>
+                      <p className="num text-[30px] font-semibold text-[var(--text)]">{cronJobs.length}</p>
+                      <p className="mt-1 text-[11px] text-[var(--text-3)]">total</p>
+                    </div>
+                  </div>
+                  <p className="mt-5 num text-[11px] text-[var(--text-3)]">
+                    Synced {formatRelative(resources.crons.data?.syncedAt)}
+                  </p>
+                </>
+              )}
+            </Panel>
+          )}
+        </div>
+      </section>
+
+      <section className="mt-12" aria-labelledby="briefing-heading">
+        <SectionHeader label="Briefing" title={<span id="briefing-heading">Daily briefing</span>} />
+        {!resources.briefing.loaded ? (
+          <Skeleton className="h-56" />
+        ) : briefingMessage ? (
+          <Panel className="p-2">
+            <EmptyState icon={<Sunrise className="w-6 h-6" />} title={briefingMessage} />
+          </Panel>
+        ) : (
+          <Panel className="p-6">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Sunrise className="w-4 h-4 text-[var(--accent)]" />
+                <Eyebrow>Hermes briefing</Eyebrow>
+              </div>
+              <span className="num text-[11px] text-[var(--text-3)]">
+                {formatRelative(resources.briefing.data?.generatedAt)}
+              </span>
+            </div>
+            {resources.briefing.data?.greeting && (
+              <p className="mt-5 text-[15px] font-medium text-[var(--text)]">{resources.briefing.data.greeting}</p>
+            )}
+            {resources.briefing.data?.summary && (
+              <p className="mt-2 max-w-[80ch] text-[14px] leading-relaxed text-[var(--text-2)]">
+                {resources.briefing.data.summary}
+              </p>
+            )}
+            {(resources.briefing.data?.sections ?? []).length > 0 && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-7">
+                {resources.briefing.data?.sections?.map((section) => (
+                  <div key={section.label}>
+                    <Eyebrow className="!text-[9.5px]">{section.label}</Eyebrow>
+                    <div className="mt-2 divide-y divide-[var(--line)]">
+                      {section.items.map((item) => (
+                        <p key={item} className="py-2 text-[13px] leading-snug text-[var(--text-2)]">
+                          {item}
+                        </p>
+                      ))}
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
-          </div>
-        </div>
+          </Panel>
+        )}
+      </section>
 
-        {/* ── Brief + Approval inbox (side-by-side on wide) ─ */}
-        <div className="mt-5 grid grid-cols-1 xl:grid-cols-3 gap-5 items-start">
-          <div className="xl:col-span-2 hq-rise" style={rise(5)}>
-            <HermesBriefing />
-          </div>
-          <div className="xl:col-span-1 hq-rise" style={rise(6)}>
-            <ApprovalInbox compact />
-          </div>
+      {allLoaded && !resources.health.connected && !resources.requests.connected && !resources.tasks.connected && (
+        <div className="mt-8 flex items-center gap-2 text-[12px] text-[var(--text-3)]">
+          <CheckCircle2 className="w-3.5 h-3.5" />
+          The shell is available, but operational data is not connected.
         </div>
-
-        {/* ── Signal ──────────────────────────────────────── */}
-        <div className="mt-14">
-          <SectionLabel>Signal</SectionLabel>
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-            <div className="hq-rise" style={rise(4)}><TopTweetsPanel tweets={data.topTweets} /></div>
-            <div className="hq-rise" style={rise(5)}><IdeasPanel sageDrafts={data.topSageDrafts} ytIdeas={data.topYoutubeIdeas} buildIdeas={data.topBuildIdeas} /></div>
-          </div>
-        </div>
-
-        {/* ── Agents strip ────────────────────────────────── */}
-        <div className="mt-14">
-          <AgentsStrip processes={data.processes} />
-        </div>
-      </div>
-    </>
+      )}
+    </div>
   );
 }

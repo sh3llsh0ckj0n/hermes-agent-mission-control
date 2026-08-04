@@ -1,7 +1,7 @@
 "use client";
 
 /* ───────────────────────────────────────────────────────────
-   Hermy HQ · Command Palette (⌘K / Ctrl-K)
+   Mission Control · Command Palette (⌘K / Ctrl-K)
    Globally mounted. Fuzzy nav + dispatch-to-Hermes fallback.
    Calm Luxury tokens, no external deps beyond lucide-react.
    ─────────────────────────────────────────────────────────── */
@@ -9,43 +9,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  LayoutDashboard,
-  Twitter,
-  FileText,
-  Youtube,
-  Activity,
-  Bot,
-  Lightbulb,
-  Sprout,
-  ListChecks,
   Sparkles,
   CornerDownLeft,
   Search,
   Check,
-  type LucideIcon,
 } from "lucide-react";
+import { getEnabledModules, type AppModule } from "@/config/modules";
 
-interface NavItem {
-  label: string;
-  href: string;
-  icon: LucideIcon;
-}
-
-const NAV: NavItem[] = [
-  { label: "Dashboard", href: "/", icon: LayoutDashboard },
-  { label: "X", href: "/x", icon: Twitter },
-  { label: "Articles", href: "/articles", icon: FileText },
-  { label: "YouTube", href: "/youtube", icon: Youtube },
-  { label: "Client Pulse", href: "/client-pulse", icon: Activity },
-  { label: "Agents", href: "/agents", icon: Bot },
-  { label: "Ideas", href: "/ideas", icon: Lightbulb },
-  { label: "Garden", href: "/garden", icon: Sprout },
-  { label: "Tasks", href: "/tasks", icon: ListChecks },
-  { label: "Hermes", href: "/hermes", icon: Sparkles },
-];
+const NAV = getEnabledModules();
 
 type Row =
-  | { kind: "nav"; item: NavItem }
+  | { kind: "nav"; item: AppModule }
   | { kind: "dispatch"; query: string };
 
 export function CommandPalette() {
@@ -71,13 +45,14 @@ export function CommandPalette() {
 
   // ── reset + focus when opening ────────────────────────────
   useEffect(() => {
-    if (open) {
+    if (!open) return;
+    const frame = requestAnimationFrame(() => {
       setQuery("");
       setActive(0);
       setDispatched(false);
-      // focus after paint so the trap works reliably
-      requestAnimationFrame(() => inputRef.current?.focus());
-    }
+      inputRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
   }, [open]);
 
   // ── lock scroll while open ────────────────────────────────
@@ -95,7 +70,7 @@ export function CommandPalette() {
     const q = query.trim().toLowerCase();
     if (!q) return NAV;
     return NAV.filter(
-      (n) => n.label.toLowerCase().includes(q) || n.href.toLowerCase().includes(q),
+      (n) => n.label.toLowerCase().includes(q) || n.route.toLowerCase().includes(q),
     );
   }, [query]);
 
@@ -109,7 +84,10 @@ export function CommandPalette() {
 
   // keep highlight in range as rows shrink/grow
   useEffect(() => {
-    setActive((a) => (rows.length === 0 ? 0 : Math.min(a, rows.length - 1)));
+    const frame = requestAnimationFrame(() => {
+      setActive((a) => (rows.length === 0 ? 0 : Math.min(a, rows.length - 1)));
+    });
+    return () => cancelAnimationFrame(frame);
   }, [rows.length]);
 
   const close = useCallback(() => setOpen(false), []);
@@ -134,7 +112,7 @@ export function CommandPalette() {
       if (!row) return;
       if (row.kind === "nav") {
         close();
-        router.push(row.item.href);
+        router.push(row.item.route);
         return;
       }
       // dispatch: confirm briefly, then jump to the Hermes page so you can
@@ -225,7 +203,7 @@ export function CommandPalette() {
                 const idx = rows.indexOf(r);
                 return (
                   <PaletteRow
-                    key={r.item.href}
+                    key={r.item.id}
                     idx={idx}
                     active={active === idx}
                     onHover={() => setActive(idx)}
@@ -234,7 +212,7 @@ export function CommandPalette() {
                   >
                     <span className="text-[var(--text)]">{r.item.label}</span>
                     <span className="num ml-auto text-[11px] text-[var(--text-4)]">
-                      {r.item.href}
+                      {r.item.route}
                     </span>
                   </PaletteRow>
                 );

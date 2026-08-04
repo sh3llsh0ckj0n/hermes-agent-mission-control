@@ -3,10 +3,11 @@
 import { usePathname } from 'next/navigation';
 import { Sidebar } from '@/components/sidebar';
 import { CommandPalette } from '@/components/command-palette';
+import { isStandaloneRoute } from '@/config/modules';
 
 export function ConditionalLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const isStandalone = pathname === '/login';
+  const isStandalone = isStandaloneRoute(pathname);
 
   if (isStandalone) {
     return <>{children}</>;

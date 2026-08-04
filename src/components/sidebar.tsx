@@ -3,70 +3,33 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
+import { Menu, X } from "lucide-react";
 import {
-  Home,
-  Twitter,
-  Play,
-  Bot,
-  Lightbulb,
-  Flower2,
-  FileText,
-  ClipboardList,
-  HeartPulse,
-  Cpu,
-  BookOpen,
-  Workflow,
-  Menu,
-  X,
-} from "lucide-react";
+  getEnabledModules,
+  getModuleForPath,
+  getNavigationGroups,
+} from "@/config/modules";
 
-const navGroups = [
-  {
-    name: "Overview",
-    items: [
-      { href: "/", label: "Dashboard", icon: Home },
-      { href: "/hermes", label: "Hermes", icon: Cpu },
-      { href: "/tasks", label: "Tasks", icon: ClipboardList },
-    ],
-  },
-  {
-    name: "Content",
-    items: [
-      { href: "/x", label: "X", icon: Twitter },
-      { href: "/content-os", label: "Pipeline", icon: Workflow },
-      { href: "/articles", label: "Articles", icon: FileText },
-      { href: "/youtube", label: "YouTube", icon: Play },
-    ],
-  },
-  {
-    name: "Data",
-    items: [
-      { href: "/client-pulse", label: "Client Pulse", icon: HeartPulse },
-    ],
-  },
-  {
-    name: "System",
-    items: [
-      { href: "/agents", label: "Agents", icon: Bot },
-      { href: "/memory-wiki", label: "Memory Wiki", icon: BookOpen },
-      { href: "/ideas", label: "Ideas", icon: Lightbulb },
-      { href: "/garden", label: "Garden", icon: Flower2 },
-    ],
-  },
-];
+const navGroups = getNavigationGroups();
+const mobileTabs = getEnabledModules().slice(0, 5);
 
-// Mobile tab bar - only show the 5 most important
-const mobileTabsRaw = [
-  { href: "/", label: "Dashboard", icon: Home },
-  { href: "/x", label: "X", icon: Twitter },
-  { href: "/youtube", label: "YouTube", icon: Play },
-  { href: "/ideas", label: "Ideas", icon: Lightbulb },
-  { href: "/agents", label: "Agents", icon: Bot },
-];
+function Logo() {
+  return (
+    <div className="flex items-center gap-2.5">
+      <div className="w-8 h-8 rounded-[10px] bg-[var(--text)] flex items-center justify-center shadow-[inset_0_1px_0_rgba(255,255,255,0.4)]">
+        <span className="text-[#0a0b0d] font-bold text-[13px] tracking-tight">H</span>
+      </div>
+      <span className="font-semibold text-[var(--text)] tracking-[-0.01em] text-[15px]">
+        Mission Control
+      </span>
+    </div>
+  );
+}
 
 export function Sidebar() {
   const pathname = usePathname();
   const [isOpen, setIsOpen] = useState(false);
+  const activeModule = getModuleForPath(pathname);
 
   // Close sidebar on route change (mobile)
   useEffect(() => {
@@ -82,15 +45,6 @@ export function Sidebar() {
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
-
-  const Logo = () => (
-    <div className="flex items-center gap-2.5">
-      <div className="w-8 h-8 rounded-[10px] bg-[var(--text)] flex items-center justify-center shadow-[inset_0_1px_0_rgba(255,255,255,0.4)]">
-        <span className="text-[#0a0b0d] font-bold text-[13px] tracking-tight">H</span>
-      </div>
-      <span className="font-semibold text-[var(--text)] tracking-[-0.01em] text-[15px]">Hermy HQ</span>
-    </div>
-  );
 
   return (
     <>
@@ -109,13 +63,13 @@ export function Sidebar() {
       {/* Mobile bottom tab bar */}
       <div className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-[var(--bg)]/90 backdrop-blur-xl border-t border-[var(--line)] px-2 py-2 safe-area-pb">
         <nav className="flex justify-around">
-          {mobileTabsRaw.map((item) => {
-            const isActive = pathname === item.href;
+          {mobileTabs.map((item) => {
+            const isActive = activeModule?.id === item.id;
             const Icon = item.icon;
             return (
               <Link
-                key={item.href}
-                href={item.href}
+                key={item.id}
+                href={item.route}
                 className={`flex flex-col items-center gap-1 p-2 px-3 rounded-lg transition-all ${
                   isActive
                     ? "text-[var(--text)] bg-[var(--surface-2)]"
@@ -168,13 +122,12 @@ export function Sidebar() {
                 </h3>
                 <div className="space-y-0.5">
                   {group.items.map((item) => {
-                    const isActive =
-                      pathname === item.href || pathname.startsWith(item.href + "/");
+                    const isActive = activeModule?.id === item.id;
                     const Icon = item.icon;
                     return (
-                      <div key={item.href}>
+                      <div key={item.id}>
                         <Link
-                          href={item.href}
+                          href={item.route}
                           className={`group relative flex items-center gap-3 px-3 py-[7px] rounded-[10px] transition-all duration-150 ${
                             isActive
                               ? "bg-[var(--surface-2)] text-[var(--text)]"
@@ -191,23 +144,6 @@ export function Sidebar() {
                           />
                           <span className="text-[13.5px] font-medium">{item.label}</span>
                         </Link>
-                        {"anchors" in group &&
-                          isActive &&
-                          (group as { anchors?: { href: string; label: string }[] }).anchors && (
-                            <div className="ml-[26px] mt-0.5 space-y-0.5 border-l border-[var(--line)] pl-3">
-                              {(group as { anchors: { href: string; label: string }[] }).anchors.map(
-                                (a) => (
-                                  <a
-                                    key={a.href}
-                                    href={a.href}
-                                    className="block text-[12px] text-[var(--text-3)] hover:text-[var(--text-2)] py-1 transition-colors"
-                                  >
-                                    {a.label}
-                                  </a>
-                                )
-                              )}
-                            </div>
-                          )}
                       </div>
                     );
                   })}
@@ -219,13 +155,7 @@ export function Sidebar() {
 
         {/* Footer */}
         <div className="px-4 py-4 border-t border-[var(--line)]">
-          <div className="flex items-center gap-2 text-[var(--text-3)] text-[11.5px]">
-            <span className="relative flex w-1.5 h-1.5">
-              <span className="absolute inline-flex h-full w-full rounded-full bg-[var(--up)] opacity-60 animate-ping" />
-              <span className="relative inline-flex w-1.5 h-1.5 rounded-full bg-[var(--up)]" />
-            </span>
-            <span>All systems online</span>
-          </div>
+          <p className="text-[var(--text-3)] text-[11.5px]">Hermes operational workspace</p>
         </div>
       </aside>
     </>

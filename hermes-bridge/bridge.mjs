@@ -14,6 +14,7 @@ import os from "node:os";
 import { buildHermesCommand, parseRequestPayload } from "./lib/command-builder.mjs";
 import { BridgeError, classifyError, sanitizeErrorMessage, ValidationError } from "./lib/errors.mjs";
 import { createLogger } from "./lib/logger.mjs";
+import { parseGatewayStatus, persistKanbanMirror } from "./lib/mirror-state.mjs";
 import { checkHermesCompatibility, runProcess, validateExecutable } from "./lib/process-runner.mjs";
 import { claimRequests } from "./lib/queue.mjs";
 import { classifyRequestKind } from "./lib/request-policy.mjs";
@@ -163,37 +164,12 @@ async function mirrorKanban() {
     return;
   }
 
-  const seen = new Set();
-  for (const task of tasks) {
-    const id = String(task.id ?? task.task_id ?? "");
-    if (!id) continue;
-    seen.add(id);
-    await q(
-      `INSERT INTO "HermesTask" (id, board, title, assignee, status, priority, result, "updatedAt", "syncedAt")
-       VALUES ($1,$2,$3,$4,$5,$6,$7, now(), now())
-       ON CONFLICT (id) DO UPDATE SET
-         title=EXCLUDED.title, assignee=EXCLUDED.assignee, status=EXCLUDED.status,
-         priority=EXCLUDED.priority, result=EXCLUDED.result, "syncedAt"=now()`,
-      [
-        id,
-        BOARD,
-        String(task.title ?? "untitled").slice(0, 300),
-        task.assignee ?? null,
-        String(task.status ?? "todo"),
-        task.priority != null ? Number(task.priority) : null,
-        task.result ? String(task.result).slice(0, 2_000) : null,
-      ],
-    );
-  }
-
-  if (seen.size) {
-    await q(`DELETE FROM "HermesTask" WHERE board=$1 AND id <> ALL($2::text[])`, [
-      BOARD,
-      [...seen],
-    ]);
-  } else {
-    await q(`DELETE FROM "HermesTask" WHERE board=$1`, [BOARD]);
-  }
+  await persistKanbanMirror({
+    tasks,
+    board: BOARD,
+    query: q,
+    setStore,
+  });
 }
 
 async function mirrorCrons() {
@@ -237,7 +213,7 @@ async function mirrorHealth() {
     const out = await hermes(["status"], { timeoutMs: 12_000 });
     detail = out.slice(0, 4_000);
     online = /online|running|connected/i.test(out);
-    gateway = /gateway[^\n]*(running|online)/i.test(out) ? "running" : "stopped";
+    gateway = parseGatewayStatus(out);
   } catch (error) {
     detail = sanitizeErrorMessage(error?.message);
   }

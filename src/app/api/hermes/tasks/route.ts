@@ -1,13 +1,25 @@
 import { NextResponse } from "next/server";
-import { withHermesServiceUnavailable } from "@/lib/hermes-service";
+import {
+  resolveHermesTasksLastSync,
+  withHermesServiceUnavailable,
+} from "@/lib/hermes-service";
 import { prisma } from "@/lib/prisma";
 
 export async function GET() {
   return withHermesServiceUnavailable(async () => {
-    const tasks = await prisma.hermesTask.findMany({ orderBy: [{ status: "asc" }, { priority: "desc" }], take: 200 });
+    const [tasks, syncMarker] = await Promise.all([
+      prisma.hermesTask.findMany({
+        orderBy: [{ status: "asc" }, { priority: "desc" }],
+        take: 200,
+      }),
+      prisma.dataStore.findUnique({
+        where: { key: "hermes-tasks" },
+        select: { data: true },
+      }),
+    ]);
     const counts: Record<string, number> = {};
     for (const t of tasks) counts[t.status] = (counts[t.status] || 0) + 1;
-    const lastSync = tasks[0]?.syncedAt ?? null;
+    const lastSync = resolveHermesTasksLastSync(syncMarker?.data, tasks);
     return NextResponse.json({ tasks, counts, total: tasks.length, lastSync });
   });
 }

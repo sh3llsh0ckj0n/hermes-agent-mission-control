@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node bridge.mjs",
     "test": "node --test test/*.test.mjs",
-    "check": "node --check bridge.mjs && node --check lib/command-builder.mjs && node --check lib/errors.mjs && node --check lib/logger.mjs && node --check lib/process-runner.mjs && node --check lib/queue.mjs && node --check lib/request-policy.mjs && node --check lib/retry.mjs && node --check lib/tls.mjs && node --check lib/wiki-path.mjs"
+    "check": "node --check bridge.mjs && node --check lib/command-builder.mjs && node --check lib/errors.mjs && node --check lib/logger.mjs && node --check lib/mirror-state.mjs && node --check lib/process-runner.mjs && node --check lib/queue.mjs && node --check lib/request-policy.mjs && node --check lib/retry.mjs && node --check lib/tls.mjs && node --check lib/wiki-path.mjs"
   },
   "engines": {
     "node": ">=22"

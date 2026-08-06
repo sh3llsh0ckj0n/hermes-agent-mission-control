@@ -2,7 +2,19 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Activity, ChevronRight, Gauge } from "lucide-react";
-import { Panel, SectionHeader, Pill, EmptyState, Eyebrow } from "@/components/ui/kit";
+import {
+  EmptyState,
+  Eyebrow,
+  Panel,
+  Pill,
+  SectionHeader,
+  Skeleton,
+} from "@/components/ui/kit";
+import {
+  modelTokenPercentage,
+  type HermesModelUsage,
+  type HermesUsageReport,
+} from "@/lib/dashboard";
 
 // ── Types ─────────────────────────────────────────────────
 type RunStatus =
@@ -29,20 +41,7 @@ interface Req {
   finishedAt: string | null;
 }
 
-interface ModelUsage {
-  model: string;
-  tokens?: number;
-  cost?: number;
-  calls?: number;
-}
-
-interface Cost {
-  summary?: string | null;
-  byModel?: ModelUsage[];
-  totalCost?: number | null;
-  totalTokens?: number | null;
-  syncedAt?: string | null;
-}
+type Cost = HermesUsageReport;
 
 // ── Helpers ───────────────────────────────────────────────
 function timeAgo(d: string | null): string {
@@ -152,93 +151,211 @@ function StatusDot({ status, reduce }: { status: RunStatus; reduce: boolean }) {
 }
 
 // ── Usage strip ───────────────────────────────────────────
-function UsageStrip({ cost }: { cost: Cost | null }) {
-  const byModel = cost?.byModel ?? [];
-  const hasAny =
-    !!cost &&
-    (!!cost.summary ||
-      byModel.length > 0 ||
-      cost.totalCost != null ||
-      cost.totalTokens != null);
+function hasStructuredUsage(cost: Cost): boolean {
+  return [
+    cost.totalSessions,
+    cost.totalMessages,
+    cost.userMessages,
+    cost.toolCalls,
+    cost.inputTokens,
+    cost.outputTokens,
+    cost.totalTokens,
+    cost.totalCost,
+  ].some((value) => value !== null) ||
+    cost.byModel.some((model) => model.sessions !== null || model.tokens !== null);
+}
 
-  if (!hasAny) {
+function formatPeriod(cost: Cost): string {
+  if (cost.period.label) return cost.period.label;
+  if (cost.period.start && cost.period.end) {
+    return `${cost.period.start} – ${cost.period.end}`;
+  }
+  if (cost.period.days !== null) return `${cost.period.days} days`;
+  return "Not reported";
+}
+
+function UsageMetric({
+  label,
+  value,
+  format = fmtTokens,
+}: {
+  label: string;
+  value: number | null;
+  format?: (value: number) => string;
+}) {
+  return (
+    <div className="rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-1)] p-4">
+      <Eyebrow>{label}</Eyebrow>
+      <p
+        className={`mt-2 ${
+          value === null
+            ? "text-[12px] font-medium text-[var(--text-3)]"
+            : "num text-[24px] font-semibold tracking-[-0.02em] text-[var(--text)]"
+        }`}
+      >
+        {value === null ? "Not reported" : format(value)}
+      </p>
+    </div>
+  );
+}
+
+function RawInsights({ raw }: { raw: string | null }) {
+  if (!raw) return null;
+  return (
+    <details className="mt-5 border-t border-[var(--line)] pt-4">
+      <summary className="cursor-pointer text-[11.5px] font-medium text-[var(--text-3)]">
+        Raw Hermes insights
+      </summary>
+      <pre className="mt-3 max-h-56 overflow-auto rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-2)] p-3 font-mono text-[10.5px] leading-relaxed text-[var(--text-3)] whitespace-pre">
+        {raw}
+      </pre>
+    </details>
+  );
+}
+
+function ModelUsageRows({ models }: { models: HermesModelUsage[] }) {
+  const sorted = [...models].sort((left, right) => {
+    if (left.tokens !== null && right.tokens !== null) return right.tokens - left.tokens;
+    if (left.tokens !== null) return -1;
+    if (right.tokens !== null) return 1;
+    return (right.sessions ?? -1) - (left.sessions ?? -1);
+  });
+  const reportedModelTokens = sorted.reduce(
+    (total, model) => total + (model.tokens ?? 0),
+    0,
+  );
+
+  return (
+    <div className="mt-6 border-t border-[var(--line)] pt-5">
+      <div className="mb-4 flex items-center justify-between">
+        <Eyebrow>Model usage</Eyebrow>
+        <span className="num text-[10.5px] text-[var(--text-3)]">
+          {models.length} {models.length === 1 ? "model" : "models"}
+        </span>
+      </div>
+      <div className="space-y-4">
+        {sorted.map((model, index) => {
+          const percentage = modelTokenPercentage(
+            model.tokens,
+            reportedModelTokens,
+          );
+          return (
+            <div key={`${model.model}-${index}`} className="min-w-0">
+              <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
+                <p
+                  className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-[var(--text-2)]"
+                  title={model.model}
+                >
+                  {model.model}
+                </p>
+                <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-[var(--text-3)]">
+                  {model.sessions !== null && (
+                    <span className="num">{model.sessions.toLocaleString("en-US")} sessions</span>
+                  )}
+                  {model.tokens !== null && (
+                    <span className="num">{fmtTokens(model.tokens)} tokens</span>
+                  )}
+                  {percentage !== null && (
+                    <span className="num">
+                      {percentage < 10 ? percentage.toFixed(1) : Math.round(percentage)}%
+                    </span>
+                  )}
+                </div>
+              </div>
+              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--surface-2)]">
+                {percentage !== null && (
+                  <div
+                    className="h-full rounded-full"
+                    style={{
+                      width: `${Math.min(100, percentage)}%`,
+                      background: "color-mix(in srgb, var(--accent) 68%, transparent)",
+                    }}
+                  />
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function UsageStrip({
+  cost,
+  loaded,
+}: {
+  cost: Cost | null;
+  loaded: boolean;
+}) {
+  if (!loaded) {
     return (
       <Panel className="p-5">
-        <p className="text-[13px] text-[var(--text-3)] flex items-center gap-2">
-          <Gauge className="w-3.5 h-3.5" />
-          Usage syncing from Hermes…
-        </p>
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          {[0, 1, 2, 3].map((metric) => (
+            <Skeleton key={metric} className="h-24" />
+          ))}
+        </div>
       </Panel>
     );
   }
 
-  // Bars are relative to the largest per-model magnitude (tokens, else cost, else calls).
-  const magnitude = (m: ModelUsage) => m.tokens ?? m.cost ?? m.calls ?? 0;
-  const max = byModel.reduce((mx, m) => Math.max(mx, magnitude(m)), 0) || 1;
+  const structured = cost ? hasStructuredUsage(cost) : false;
+  const hasReport = Boolean(
+    cost && (cost.syncedAt || cost.raw || structured),
+  );
+  if (!cost || !hasReport) {
+    return (
+      <Panel className="p-2">
+        <EmptyState
+          icon={<Gauge className="h-6 w-6" />}
+          title="Usage data has not been reported yet"
+          hint="Hermes usage totals will appear after the bridge completes a successful insights sync."
+        />
+      </Panel>
+    );
+  }
 
   return (
     <Panel className="p-5">
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-        <div>
-          <Eyebrow>Total cost</Eyebrow>
-          <div className="num font-semibold text-[26px] tracking-[-0.02em] text-[var(--text)] leading-none mt-2">
-            {cost?.totalCost != null ? fmtUsd(cost.totalCost) : "—"}
-          </div>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div className="min-w-0">
+          <Eyebrow>Reporting period</Eyebrow>
+          <p className="mt-1.5 truncate text-[13px] text-[var(--text-2)]">
+            {formatPeriod(cost)}
+          </p>
         </div>
-        <div>
-          <Eyebrow>Total tokens</Eyebrow>
-          <div className="num font-semibold text-[26px] tracking-[-0.02em] text-[var(--text)] leading-none mt-2">
-            {cost?.totalTokens != null ? fmtTokens(cost.totalTokens) : "—"}
-          </div>
-        </div>
-        <div>
-          <Eyebrow>Synced</Eyebrow>
-          <div className="num text-[13px] text-[var(--text-2)] mt-2.5">
-            {timeAgo(cost?.syncedAt ?? null)}
-          </div>
+        <div className="sm:text-right">
+          <Eyebrow>Last synchronized</Eyebrow>
+          <p className="num mt-1.5 text-[12px] text-[var(--text-2)]">
+            {timeAgo(cost.syncedAt)}
+          </p>
         </div>
       </div>
 
-      {cost?.summary && (
-        <p className="mt-4 text-[12.5px] text-[var(--text-2)] leading-snug">
-          {cost.summary}
-        </p>
+      {structured ? (
+        <>
+          <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <UsageMetric label="Sessions" value={cost.totalSessions} />
+            <UsageMetric label="Messages" value={cost.totalMessages} />
+            <UsageMetric label="Tool calls" value={cost.toolCalls} />
+            <UsageMetric label="Total tokens" value={cost.totalTokens} />
+            {cost.totalCost !== null && (
+              <UsageMetric label="Total cost" value={cost.totalCost} format={fmtUsd} />
+            )}
+          </div>
+          {cost.byModel.length > 0 && <ModelUsageRows models={cost.byModel} />}
+        </>
+      ) : (
+        <EmptyState
+          icon={<Gauge className="h-6 w-6" />}
+          title="Usage report synchronized, but Hermes did not provide structured totals"
+          hint="The original report remains available below for diagnostics."
+          className="!pb-8"
+        />
       )}
 
-      {byModel.length > 0 && (
-        <div className="mt-5 pt-4 border-t border-[var(--line)] flex flex-col gap-2.5">
-          <Eyebrow>By model</Eyebrow>
-          {byModel.map((m) => {
-            const val = magnitude(m);
-            const pct = Math.max(3, Math.round((val / max) * 100));
-            return (
-              <div key={m.model} className="flex items-center gap-3">
-                <span className="text-[12px] text-[var(--text-2)] w-40 shrink-0 truncate">
-                  {m.model}
-                </span>
-                <div className="flex-1 h-[6px] rounded-full bg-[var(--surface-2)] overflow-hidden">
-                  <div
-                    className="h-full rounded-full"
-                    style={{
-                      width: `${pct}%`,
-                      background: "color-mix(in srgb, var(--accent) 70%, transparent)",
-                    }}
-                  />
-                </div>
-                <span className="num text-[11px] text-[var(--text-3)] shrink-0 w-24 text-right">
-                  {m.tokens != null
-                    ? `${fmtTokens(m.tokens)} tok`
-                    : m.cost != null
-                      ? fmtUsd(m.cost)
-                      : m.calls != null
-                        ? `${m.calls} calls`
-                        : "—"}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      )}
+      <RawInsights raw={cost.raw} />
     </Panel>
   );
 }
@@ -398,10 +515,11 @@ export function HermesRuns() {
 
   useEffect(() => {
     mounted.current = true;
-    load();
+    const initial = setTimeout(load, 0);
     const iv = setInterval(load, 8000);
     return () => {
       mounted.current = false;
+      clearTimeout(initial);
       clearInterval(iv);
     };
   }, [load]);
@@ -415,7 +533,7 @@ export function HermesRuns() {
         </h2>
       </div>
 
-      <UsageStrip cost={cost} />
+      <UsageStrip cost={cost} loaded={loaded} />
 
       <div>
         <RunHistory runs={runs} loaded={loaded} reduce={reduce} />

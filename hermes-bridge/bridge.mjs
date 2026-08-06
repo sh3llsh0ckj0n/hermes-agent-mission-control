@@ -13,6 +13,7 @@ import os from "node:os";
 
 import { buildHermesCommand, parseRequestPayload } from "./lib/command-builder.mjs";
 import { BridgeError, classifyError, sanitizeErrorMessage, ValidationError } from "./lib/errors.mjs";
+import { parseHermesInsights } from "./lib/insights-parser.mjs";
 import { createLogger } from "./lib/logger.mjs";
 import { parseGatewayStatus, persistKanbanMirror } from "./lib/mirror-state.mjs";
 import { checkHermesCompatibility, runProcess, validateExecutable } from "./lib/process-runner.mjs";
@@ -194,8 +195,9 @@ async function mirrorCost() {
     try {
       const out = await hermes(args, { timeoutMs: 15_000 });
       await setStore("hermes-cost", {
-        summary: out.slice(0, 4_000),
+        ...parseHermesInsights(out),
         syncedAt: new Date().toISOString(),
+        raw: out,
       });
       return;
     } catch {

@@ -1,204 +1,280 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Button, Pill, rise } from "@/components/ui/kit";
+import { ClipboardList } from "lucide-react";
 
-interface Task {
+import {
+  EmptyState,
+  Eyebrow,
+  Panel,
+  Pill,
+  Skeleton,
+  rise,
+} from "@/components/ui/kit";
+import { fetchHermesJSON } from "@/lib/hermes-client";
+import { taskBoardEmptyMessage, taskBucket } from "@/lib/dashboard";
+
+interface HermesTask {
   id: string;
-  name: string;
+  board: string;
+  title: string;
+  assignee?: string | null;
   status: string;
-  priority: string;
-  category: string;
-  dueDate?: string;
+  priority?: number | null;
+  result?: string | null;
+  updatedAt: string;
+  syncedAt: string;
 }
 
-const columns = [
-  { id: "Not started", label: "To Do" },
-  { id: "Approved", label: "Approved" },
-  { id: "In progress", label: "In Progress" },
-  { id: "Done", label: "Done" },
+interface HermesTasksResponse {
+  tasks: HermesTask[];
+  counts: Record<string, number>;
+  total: number;
+  lastSync: string | null;
+}
+
+type LoadState = "loading" | "ready" | "not-connected";
+type TaskColumn = "todo" | "active" | "completed";
+
+const COLUMNS: ReadonlyArray<{
+  id: TaskColumn;
+  label: string;
+  tone: "neutral" | "accent" | "up";
+}> = [
+  { id: "todo", label: "To do", tone: "neutral" },
+  { id: "active", label: "Active", tone: "accent" },
+  { id: "completed", label: "Completed", tone: "up" },
 ];
 
+function formatLastSync(value: string | null): string {
+  if (!value) return "Not reported";
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime())) return "Not reported";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(timestamp);
+}
+
+function resultPreview(value: string | null | undefined): string | null {
+  const result = value?.trim();
+  if (!result) return null;
+  return result.length > 220 ? `${result.slice(0, 217)}…` : result;
+}
+
 export default function TasksPage() {
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [newTask, setNewTask] = useState("");
-  const [showAddTask, setShowAddTask] = useState(false);
+  const [loadState, setLoadState] = useState<LoadState>("loading");
+  const [taskData, setTaskData] = useState<HermesTasksResponse | null>(null);
 
   useEffect(() => {
-    fetchTasks();
+    let cancelled = false;
+
+    async function loadTasks() {
+      const result = await fetchHermesJSON<HermesTasksResponse>(
+        "/api/hermes/tasks",
+      );
+      if (cancelled) return;
+
+      if (result.status === "ok") {
+        setTaskData(result.data);
+        setLoadState("ready");
+        return;
+      }
+
+      setTaskData(null);
+      setLoadState("not-connected");
+    }
+
+    void loadTasks();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  async function fetchTasks() {
-    try {
-      const res = await fetch("/api/tasks");
-      const data = await res.json();
-      setTasks(data.tasks || []);
-    } catch (e) {
-      console.error("Failed to fetch tasks", e);
-    } finally {
-      setLoading(false);
-    }
-  }
+  if (loadState === "loading") return <TaskBoardSkeleton />;
 
-  async function addTask() {
-    if (!newTask.trim()) return;
-    try {
-      await fetch("/api/tasks", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newTask, status: "Not started" }),
-      });
-      setNewTask("");
-      setShowAddTask(false);
-      fetchTasks();
-    } catch (e) {
-      console.error("Failed to add task", e);
-    }
-  }
+  const tasks = taskData?.tasks ?? [];
+  const emptyMessage = taskBoardEmptyMessage({
+    connected: loadState === "ready",
+    taskCount: tasks.length,
+    lastSync: taskData?.lastSync ?? null,
+  });
 
-  async function updateTaskStatus(taskId: string, newStatus: string) {
-    try {
-      await fetch("/api/tasks", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: taskId, status: newStatus }),
-      });
-      fetchTasks();
-    } catch (e) {
-      console.error("Failed to update task", e);
-    }
-  }
+  return (
+    <div className="relative z-10 w-full mx-auto pt-4 pb-16">
+      <header
+        className="hq-rise flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between mb-10"
+        style={rise(0)}
+      >
+        <div>
+          <Eyebrow>Hermes task board</Eyebrow>
+          <h1 className="mt-2.5 text-[36px] sm:text-[40px] font-semibold tracking-[-0.025em] leading-none text-[var(--text)]">
+            Tasks
+          </h1>
+          <p className="mt-3 max-w-xl text-[13px] leading-relaxed text-[var(--text-3)]">
+            Read-only work mirrored from the Hermes kanban board.
+          </p>
+        </div>
 
-  if (loading) {
-    return (
-      <>
-        <div className="relative z-10 w-full mx-auto pt-4">
-          <div className="flex justify-between items-center mb-10">
-            <div>
-              <div className="sk h-3 w-20 mb-3" />
-              <div className="sk h-7 w-28" />
-            </div>
-            <div className="sk h-9 w-28 rounded-full" />
+        <div className="flex items-center gap-5 sm:text-right">
+          <div>
+            <p className="num text-[18px] font-semibold text-[var(--text)]">
+              {taskData?.total ?? 0}
+            </p>
+            <p className="mt-1 text-[10px] uppercase tracking-[0.14em] text-[var(--text-3)]">
+              Total tasks
+            </p>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
-            {[...Array(4)].map((_, i) => (
-              <div key={i} className="panel p-4">
-                <div className="sk h-4 w-16 mb-4" />
-                <div className="space-y-2">
-                  {[...Array(i + 1)].map((_, j) => <div key={j} className="sk h-16 rounded-[var(--r-md)]" />)}
-                </div>
-              </div>
-            ))}
+          <div className="h-8 w-px bg-[var(--line)]" />
+          <div>
+            <p className="num text-[12px] font-medium text-[var(--text-2)]">
+              {formatLastSync(taskData?.lastSync ?? null)}
+            </p>
+            <p className="mt-1 text-[10px] uppercase tracking-[0.14em] text-[var(--text-3)]">
+              Last synchronized
+            </p>
           </div>
         </div>
-      </>
-    );
+      </header>
+
+      {emptyMessage ? (
+        <Panel className="hq-rise p-2" style={rise(1)}>
+          <EmptyState
+            icon={<ClipboardList className="h-6 w-6" />}
+            title={emptyMessage}
+            hint={
+              emptyMessage === "Not connected"
+                ? "The Hermes task API is unavailable. No task data is being inferred."
+                : emptyMessage === "Bridge has not reported"
+                  ? "The bridge has not completed its first task-board synchronization."
+                  : "The bridge synchronized successfully and the Hermes board is empty."
+            }
+          />
+        </Panel>
+      ) : (
+        <TaskColumns tasks={tasks} />
+      )}
+    </div>
+  );
+}
+
+function TaskColumns({ tasks }: { tasks: HermesTask[] }) {
+  const grouped = COLUMNS.reduce<Record<TaskColumn, HermesTask[]>>(
+    (columns, column) => {
+      columns[column.id] = [];
+      return columns;
+    },
+    { todo: [], active: [], completed: [] },
+  );
+
+  for (const task of tasks) {
+    grouped[taskBucket(task.status)].push(task);
   }
 
   return (
-    <>
-      <div className="relative z-10 h-full flex flex-col w-full mx-auto pt-4 pb-16">
-        <div className="hq-rise flex justify-between items-end gap-4 mb-10" style={rise(0)}>
-          <div>
-            <div className="eyebrow mb-2">Synced with Notion</div>
-            <h1 className="text-[32px] font-semibold tracking-[-0.025em] leading-none text-[var(--text)]">Tasks</h1>
+    <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+      {COLUMNS.map((column, index) => (
+        <section
+          key={column.id}
+          className="hq-rise panel flex min-h-56 flex-col overflow-hidden"
+          style={rise(index + 1)}
+        >
+          <div className="flex items-center justify-between px-4 py-3.5">
+            <Eyebrow>{column.label}</Eyebrow>
+            <span className="num text-[11px] text-[var(--text-3)]">
+              {grouped[column.id].length}
+            </span>
           </div>
-          <Button variant="primary" onClick={() => setShowAddTask(true)}>+ Add Task</Button>
-        </div>
-
-        {showAddTask && (
-          <div className="hq-rise elevated mb-8 p-5">
-            <input
-              type="text"
-              value={newTask}
-              onChange={(e) => setNewTask(e.target.value)}
-              placeholder="What needs to be done?"
-              className="w-full bg-[var(--surface-1)] border border-[var(--line)] text-[var(--text)] placeholder-[var(--text-3)] rounded-[var(--r-md)] px-4 py-3 mb-3 text-[14px] focus:outline-none focus:border-[var(--line-strong)]"
-              onKeyDown={(e) => e.key === "Enter" && addTask()}
-              autoFocus
-            />
-            <div className="flex gap-2">
-              <Button variant="primary" onClick={addTask}>Add Task</Button>
-              <Button variant="ghost" onClick={() => setShowAddTask(false)}>Cancel</Button>
-            </div>
+          <div className="rule" />
+          <div className="flex flex-1 flex-col gap-2.5 p-2.5">
+            {grouped[column.id]
+              .sort((left, right) => (right.priority ?? 0) - (left.priority ?? 0))
+              .map((task) => (
+                <TaskCard key={task.id} task={task} tone={column.tone} />
+              ))}
+            {grouped[column.id].length === 0 && (
+              <p className="py-8 text-center text-[12.5px] text-[var(--text-4)]">
+                No tasks
+              </p>
+            )}
           </div>
-        )}
-
-        <div className="flex-1 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5 overflow-hidden">
-          {columns.map((column, idx) => {
-            const count = tasks.filter((t) => t.status === column.id).length;
-            return (
-              <div key={column.id} className="hq-rise panel flex flex-col overflow-hidden" style={rise(idx + 1)}>
-                <div className="px-4 py-3.5 flex items-center justify-between">
-                  <span className="eyebrow">{column.label}</span>
-                  <span className="num text-[11px] text-[var(--text-3)]">{count}</span>
-                </div>
-                <div className="rule" />
-                <div className="flex-1 p-2.5 space-y-2 overflow-y-auto">
-                  {tasks
-                    .filter((t) => t.status === column.id)
-                    .map((task) => (
-                      <TaskCard
-                        key={task.id}
-                        task={task}
-                        done={column.id === "Done"}
-                        onStatusChange={(status) => updateTaskStatus(task.id, status)}
-                      />
-                    ))}
-                  {count === 0 && (
-                    <p className="text-[var(--text-4)] text-[12.5px] text-center py-8">No tasks</p>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </>
+        </section>
+      ))}
+    </div>
   );
 }
 
 function TaskCard({
   task,
-  done,
-  onStatusChange,
+  tone,
 }: {
-  task: Task;
-  done?: boolean;
-  onStatusChange: (status: string) => void;
+  task: HermesTask;
+  tone: "neutral" | "accent" | "up";
 }) {
-  const priorityTone: Record<string, "warn" | "neutral"> = {
-    High: "warn",
-    Medium: "neutral",
-    Low: "neutral",
-  };
+  const result = resultPreview(task.result);
 
   return (
-    <div className="rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-1)] p-3.5 transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-2)] cursor-pointer group">
-      <p className={`font-medium text-[13px] mb-3 leading-relaxed ${done ? "text-[var(--text-3)] line-through" : "text-[var(--text)]"}`}>
-        {task.name}
+    <article
+      className="rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-1)] p-3.5"
+      style={{
+        borderLeft: `2px solid color-mix(in srgb, ${
+          tone === "neutral" ? "var(--text-3)" : `var(--${tone})`
+        } 55%, transparent)`,
+      }}
+    >
+      <p className="text-[13px] font-medium leading-relaxed text-[var(--text)]">
+        {task.title}
       </p>
-      <div className="flex items-center gap-2 flex-wrap">
-        {task.priority && (
-          <Pill tone={priorityTone[task.priority] || "neutral"}>{task.priority}</Pill>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Pill tone={tone}>{task.status}</Pill>
+        {task.assignee && (
+          <span className="text-[11px] text-[var(--text-3)]">
+            {task.assignee}
+          </span>
         )}
-        {task.category && (
-          <span className="text-[11px] text-[var(--text-3)]">{task.category}</span>
+        {task.priority != null && (
+          <span className="num ml-auto text-[10.5px] text-[var(--text-3)]">
+            P{task.priority}
+          </span>
         )}
       </div>
-      <div className="mt-3 pt-3 border-t border-[var(--line)] opacity-0 group-hover:opacity-100 transition-opacity">
-        <select
-          className="text-[12px] bg-[var(--surface-1)] text-[var(--text-2)] rounded-[var(--r-sm)] px-3 py-2 w-full border border-[var(--line)] focus:outline-none focus:border-[var(--line-strong)]"
-          value={task.status}
-          onChange={(e) => onStatusChange(e.target.value)}
-        >
-          {columns.map((col) => (
-            <option key={col.id} value={col.id}>
-              Move to {col.label}
-            </option>
-          ))}
-        </select>
+
+      {result && (
+        <p className="mt-3 border-t border-[var(--line)] pt-3 text-[11.5px] leading-relaxed text-[var(--text-3)]">
+          {result}
+        </p>
+      )}
+    </article>
+  );
+}
+
+function TaskBoardSkeleton() {
+  return (
+    <div className="relative z-10 w-full mx-auto pt-4 pb-16">
+      <div className="mb-10 flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <Skeleton className="h-3 w-28" />
+          <Skeleton className="mt-3 h-10 w-36" />
+          <Skeleton className="mt-4 h-3 w-72 max-w-full" />
+        </div>
+        <Skeleton className="h-12 w-56" />
+      </div>
+      <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+        {[0, 1, 2].map((column) => (
+          <Panel key={column} className="p-4">
+            <div className="flex items-center justify-between">
+              <Skeleton className="h-3 w-20" />
+              <Skeleton className="h-3 w-5" />
+            </div>
+            <div className="mt-4 space-y-2.5">
+              <Skeleton className="h-24" />
+              <Skeleton className="h-20" />
+            </div>
+          </Panel>
+        ))}
       </div>
     </div>
   );

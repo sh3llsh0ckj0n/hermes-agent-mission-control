@@ -1,0 +1,45 @@
+import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import test from "node:test";
+
+import { taskBoardEmptyMessage } from "../src/lib/dashboard";
+
+const tasksPagePath = new URL("../src/app/tasks/page.tsx", import.meta.url);
+const legacyRoutePath = new URL("../src/app/api/tasks/route.ts", import.meta.url);
+const tasksPageSource = readFileSync(tasksPagePath, "utf8");
+
+test("enabled Tasks page reads only the Hermes task endpoint", () => {
+  assert.match(tasksPageSource, /["']\/api\/hermes\/tasks["']/);
+  assert.doesNotMatch(tasksPageSource, /["']\/api\/tasks["']/);
+});
+
+test("enabled Tasks page contains no Notion or fabricated-task assumptions", () => {
+  assert.doesNotMatch(tasksPageSource, /Synced with Notion/i);
+  assert.doesNotMatch(tasksPageSource, /Add Task/i);
+  assert.doesNotMatch(tasksPageSource, /Review Polymarket bot strategy/i);
+  assert.doesNotMatch(tasksPageSource, /Build Hermy HQ dashboard/i);
+  assert.doesNotMatch(tasksPageSource, /Daily brief automation/i);
+  assert.equal(existsSync(legacyRoutePath), false);
+});
+
+test("empty synchronized task boards render an honest empty state", () => {
+  assert.equal(
+    taskBoardEmptyMessage({
+      connected: true,
+      taskCount: 0,
+      lastSync: "2026-08-05T12:34:56.000Z",
+    }),
+    "No tasks yet",
+  );
+});
+
+test("unsynchronized task boards report that the bridge has not reported", () => {
+  assert.equal(
+    taskBoardEmptyMessage({
+      connected: true,
+      taskCount: 0,
+      lastSync: null,
+    }),
+    "Bridge has not reported",
+  );
+});

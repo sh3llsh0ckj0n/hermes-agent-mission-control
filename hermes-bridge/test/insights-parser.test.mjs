@@ -24,6 +24,59 @@ const INSIGHTS_FIXTURE = `\u001b[36m╭─────────────�
 │ Peak hours: 14                                          │
 ╰──────────────────────────────────────────────────────────╯`;
 
+const HERMES_020_FIXTURE = `Hermes Insights
+Last 7 days
+
+Period: Jul 29, 2026 — Aug 05, 2026
+
+Overview
+Sessions:          78            Messages:        8,983
+Tool calls:        5,108         User messages:   324
+Input tokens:      19,392,487    Output tokens:   1,299,497
+Total tokens:      261,750,501
+
+Models Used
+Model                          Sessions       Tokens
+gpt-5.6-sol                          53  252,635,390
+kimi-k2.6                             7    5,269,886
+gemini-2.5-flash                     19    3,845,225
+
+Platforms
+cli                                  78        8,983
+
+Top Tools
+terminal                          5,108       99,999
+
+Activity Patterns
+Active days: 7
+
+Notable Sessions
+Session 42 — 18,500 messages`;
+
+test("parser extracts the Hermes 0.20 plain-text insights format", () => {
+  const parsed = parseHermesInsights(HERMES_020_FIXTURE);
+
+  assert.deepEqual(parsed.period, {
+    label: "Jul 29, 2026 — Aug 05, 2026",
+    start: "2026-07-29",
+    end: "2026-08-05",
+    days: 7,
+  });
+  assert.equal(parsed.totalSessions, 78);
+  assert.equal(parsed.totalMessages, 8_983);
+  assert.equal(parsed.toolCalls, 5_108);
+  assert.equal(parsed.userMessages, 324);
+  assert.equal(parsed.inputTokens, 19_392_487);
+  assert.equal(parsed.outputTokens, 1_299_497);
+  assert.equal(parsed.totalTokens, 261_750_501);
+  assert.equal(parsed.totalCost, null);
+  assert.deepEqual(parsed.byModel, [
+    { model: "gpt-5.6-sol", sessions: 53, tokens: 252_635_390 },
+    { model: "kimi-k2.6", sessions: 7, tokens: 5_269_886 },
+    { model: "gemini-2.5-flash", sessions: 19, tokens: 3_845_225 },
+  ]);
+});
+
 test("parser extracts comma-formatted totals and period fields", () => {
   const parsed = parseHermesInsights(INSIGHTS_FIXTURE);
 
@@ -65,6 +118,58 @@ test("parser removes terminal controls and tolerates box-formatted output", () =
 
   assert.doesNotMatch(sanitized, /\u001b\[/);
   assert.equal(parseHermesInsights(INSIGHTS_FIXTURE).totalTokens, 1_545_678);
+});
+
+test("later sections cannot become overview totals or model rows", () => {
+  const parsed = parseHermesInsights(`Hermes Insights
+Overview
+Sessions: invalid
+Messages: nope
+
+Models Used
+Model                          Sessions       Tokens
+gpt-5.6-sol                           2        1,000
+
+Platforms
+Messages: 7,777
+cli                                  99       99,999
+
+Top Tools
+fake-model                           88       88,888
+
+Notable Sessions
+Total tokens: 123,456,789
+Tool calls: 4,321`);
+
+  assert.equal(parsed.totalSessions, null);
+  assert.equal(parsed.totalMessages, null);
+  assert.equal(parsed.totalTokens, null);
+  assert.equal(parsed.toolCalls, null);
+  assert.deepEqual(parsed.byModel, [
+    { model: "gpt-5.6-sol", sessions: 2, tokens: 1_000 },
+  ]);
+});
+
+test("malformed metric values and invalid English dates remain null", () => {
+  const parsed = parseHermesInsights(`Last seven days
+Period: Feb 30, 2026 — Aug 05, 2026
+Overview
+Sessions: 78x            Messages: 8.5
+Input tokens: 19,39,487  Output tokens: unavailable
+Total tokens: unknown`);
+
+  assert.deepEqual(parsed.period, {
+    label: "Feb 30, 2026 — Aug 05, 2026",
+    start: null,
+    end: "2026-08-05",
+    days: null,
+  });
+  assert.equal(parsed.totalSessions, null);
+  assert.equal(parsed.totalMessages, null);
+  assert.equal(parsed.inputTokens, null);
+  assert.equal(parsed.outputTokens, null);
+  assert.equal(parsed.totalTokens, null);
+  assert.equal(parsed.totalCost, null);
 });
 
 test("malformed or incomplete output fails closed without plausible values", () => {

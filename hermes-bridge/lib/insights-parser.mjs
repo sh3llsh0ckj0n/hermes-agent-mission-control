@@ -4,6 +4,49 @@ const BOX_VERTICAL = /[\u2502\u2503\u2551]/;
 const BOX_DRAWING = /[\u2500-\u257f]/g;
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
 const STRICT_INTEGER = /^(?:\d{1,3}(?:,\d{3})*|\d+)$/;
+const METRIC_LABELS = [
+  "Total sessions",
+  "Total messages",
+  "User messages",
+  "Input tokens",
+  "Output tokens",
+  "Total tokens",
+  "Tool calls",
+  "Sessions",
+  "Messages",
+];
+const INSIGHTS_SECTIONS =
+  /^(?:overview|models used|model usage|usage by model|models|platforms?|top tools?|top skills?|activity patterns?|notable sessions?|active days?|peak hours?|usage totals?|summary)\b/i;
+const MODEL_SECTION_END =
+  /^(?:platforms?|top tools?|top skills?|activity patterns?|notable sessions?|active days?|peak hours?|usage totals?|summary)\b/i;
+const ENGLISH_MONTHS = new Map([
+  ["jan", 1],
+  ["january", 1],
+  ["feb", 2],
+  ["february", 2],
+  ["mar", 3],
+  ["march", 3],
+  ["apr", 4],
+  ["april", 4],
+  ["may", 5],
+  ["jun", 6],
+  ["june", 6],
+  ["jul", 7],
+  ["july", 7],
+  ["aug", 8],
+  ["august", 8],
+  ["sep", 9],
+  ["sept", 9],
+  ["september", 9],
+  ["oct", 10],
+  ["october", 10],
+  ["nov", 11],
+  ["november", 11],
+  ["dec", 12],
+  ["december", 12],
+]);
+const ENGLISH_MONTH_PATTERN =
+  "Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?";
 
 function cleanCell(value) {
   return value
@@ -44,15 +87,74 @@ function uniqueValue(values) {
   return unique.length === 1 ? unique[0] : null;
 }
 
-function integerMetric(cells, labels) {
-  const values = [];
-  for (const cell of cells) {
-    for (const label of labels) {
-      const value = labeledValue(cell, label);
-      if (value !== null) values.push(parseInteger(value));
+function metricLines(lines) {
+  const overviewIndex = lines.findIndex((line) =>
+    lineCells(line).some((cell) => /^overview$/i.test(cell)),
+  );
+  if (overviewIndex < 0) return lines;
+
+  const overview = [];
+  for (const line of lines.slice(overviewIndex + 1)) {
+    const cells = lineCells(line);
+    if (cells.some((cell) => INSIGHTS_SECTIONS.test(cell))) break;
+    overview.push(line);
+  }
+  return overview;
+}
+
+function parseOverviewMetrics(lines) {
+  const values = new Map(METRIC_LABELS.map((label) => [label.toLowerCase(), []]));
+  const labelsPattern = METRIC_LABELS.map(escapePattern).join("|");
+  const metricPattern = new RegExp(
+    `(?:^|\\s)(${labelsPattern})\\s*(?::|=)?\\s*((?:\\d{1,3}(?:,\\d{3})*|\\d+))(?=\\s*(?:(?:${labelsPattern})\\s*(?::|=)?|$))`,
+    "gi",
+  );
+
+  for (const line of metricLines(lines)) {
+    for (const cell of lineCells(line)) {
+      for (const match of cell.matchAll(metricPattern)) {
+        values.get(match[1].toLowerCase())?.push(parseInteger(match[2]));
+      }
     }
   }
-  return uniqueValue(values);
+
+  return values;
+}
+
+function integerMetric(metrics, labels) {
+  return uniqueValue(
+    labels.flatMap((label) => metrics.get(label.toLowerCase()) ?? []),
+  );
+}
+
+function formatDate(year, month, day) {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function parseIsoDate(value) {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return match
+    ? formatDate(Number(match[1]), Number(match[2]), Number(match[3]))
+    : null;
+}
+
+function parseEnglishDate(value) {
+  const match = value.match(
+    new RegExp(`^(${ENGLISH_MONTH_PATTERN})\\s+(\\d{1,2}),\\s+(\\d{4})$`, "i"),
+  );
+  if (!match) return null;
+  const month = ENGLISH_MONTHS.get(match[1].toLowerCase()) ?? null;
+  return month
+    ? formatDate(Number(match[3]), month, Number(match[2]))
+    : null;
 }
 
 function parsePeriod(cells) {
@@ -67,13 +169,37 @@ function parsePeriod(cells) {
   const label = uniqueValue(values);
   if (!label) return { label: null, start: null, end: null, days: null };
 
-  const dates = label.match(/\b\d{4}-\d{2}-\d{2}\b/g) ?? [];
-  const daysMatch = label.match(/\b(\d{1,3}(?:,\d{3})*|\d+)\s+days?\b/i);
+  const isoDates = label.match(/\b\d{4}-\d{2}-\d{2}\b/g) ?? [];
+  const englishDates = [
+    ...label.matchAll(
+      new RegExp(
+        `\\b((?:${ENGLISH_MONTH_PATTERN})\\s+\\d{1,2},\\s+\\d{4})\\b`,
+        "gi",
+      ),
+    ),
+  ].map((match) => match[1]);
+  const parsedDates =
+    isoDates.length === 2
+      ? isoDates.map(parseIsoDate)
+      : englishDates.length === 2
+        ? englishDates.map(parseEnglishDate)
+        : [];
+  const dayValues = cells.flatMap((cell) => {
+    const match = cell.match(
+      /^(?:last|past)\s+(\d{1,3}(?:,\d{3})*|\d+)\s+days?$/i,
+    );
+    return match ? [parseInteger(match[1])] : [];
+  });
+  const labelDays = label.match(
+    /\b(?:last|past)\s+(\d{1,3}(?:,\d{3})*|\d+)\s+days?\b/i,
+  );
+  if (labelDays) dayValues.push(parseInteger(labelDays[1]));
+
   return {
     label,
-    start: dates[0] ?? null,
-    end: dates[1] ?? null,
-    days: daysMatch ? parseInteger(daysMatch[1]) : null,
+    start: parsedDates[0] ?? null,
+    end: parsedDates[1] ?? null,
+    days: uniqueValue(dayValues),
   };
 }
 
@@ -150,19 +276,27 @@ function parseModelUsage(lines) {
       continue;
     }
 
+    const spaced = line.replace(BOX_DRAWING, " ").trim();
     const single = nonEmpty.join(" ").replace(/\s+/g, " ").trim();
-    if (/^(?:model usage|usage by model|models)$/i.test(single)) {
+    if (/^(?:models used|model usage|usage by model|models)$/i.test(single)) {
       inModelSection = true;
+      columns = null;
       pendingModel = "";
       continue;
     }
-    if (/^(?:platforms?|top tools?|active days?|peak hours?|usage totals?|summary)\b/i.test(single)) {
+    if (MODEL_SECTION_END.test(single)) {
       columns = null;
       inModelSection = false;
       pendingModel = "";
       continue;
     }
     if (!inModelSection) continue;
+
+    if (/^model\s+sessions\s+tokens$/i.test(single)) {
+      columns = null;
+      pendingModel = "";
+      continue;
+    }
 
     if (columns) {
       const modelPart = cells[columns.modelIndex] ?? "";
@@ -178,7 +312,7 @@ function parseModelUsage(lines) {
       continue;
     }
 
-    const row = single.match(/^(.+?)\s{2,}([\d,]+)\s{2,}([\d,]+)$/);
+    const row = spaced.match(/^(.+?)\s{2,}([\d,]+)\s{2,}([\d,]+)$/);
     if (row) {
       const sessions = parseInteger(row[2]);
       const tokens = parseInteger(row[3]);
@@ -206,16 +340,17 @@ export function parseHermesInsights(output) {
   const sanitized = sanitizeInsightsOutput(output);
   const lines = sanitized.split("\n");
   const cells = lines.flatMap((line) => lineCells(line)).filter(Boolean);
+  const metrics = parseOverviewMetrics(lines);
 
   return {
     period: parsePeriod(cells),
-    totalSessions: integerMetric(cells, ["Total sessions", "Sessions"]),
-    totalMessages: integerMetric(cells, ["Total messages", "Messages"]),
-    userMessages: integerMetric(cells, ["User messages"]),
-    toolCalls: integerMetric(cells, ["Tool calls"]),
-    inputTokens: integerMetric(cells, ["Input tokens"]),
-    outputTokens: integerMetric(cells, ["Output tokens"]),
-    totalTokens: integerMetric(cells, ["Total tokens"]),
+    totalSessions: integerMetric(metrics, ["Total sessions", "Sessions"]),
+    totalMessages: integerMetric(metrics, ["Total messages", "Messages"]),
+    userMessages: integerMetric(metrics, ["User messages"]),
+    toolCalls: integerMetric(metrics, ["Tool calls"]),
+    inputTokens: integerMetric(metrics, ["Input tokens"]),
+    outputTokens: integerMetric(metrics, ["Output tokens"]),
+    totalTokens: integerMetric(metrics, ["Total tokens"]),
     totalCost: parseExplicitCost(cells),
     byModel: parseModelUsage(lines),
   };

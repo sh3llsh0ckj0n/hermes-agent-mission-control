@@ -46,7 +46,7 @@ const LABEL: Record<string, string> = {
   rejected: "Rejected",
 };
 
-export function HermesDispatches() {
+export function HermesDispatches({ refreshKey }: { refreshKey: number }) {
   const [reqs, setReqs] = useState<Req[]>([]);
   const [loaded, setLoaded] = useState(false);
 
@@ -59,10 +59,13 @@ export function HermesDispatches() {
   }, []);
 
   useEffect(() => {
-    load();
+    const initial = setTimeout(load, 0);
     const iv = setInterval(load, 5000);
-    return () => clearInterval(iv);
-  }, [load]);
+    return () => {
+      clearTimeout(initial);
+      clearInterval(iv);
+    };
+  }, [load, refreshKey]);
 
   return (
     <div>

@@ -25,6 +25,7 @@ test("Hermes request kinds receive server-owned risk classifications", () => {
     "memory.update": "local_write",
     "memory.remove": "destructive",
     "briefing.generate": "read_only",
+    "diagnostic.status": "read_only",
   } as const;
 
   for (const [kind, expectedRisk] of Object.entries(matrix)) {
@@ -71,11 +72,14 @@ test("unknown Hermes request kinds fail closed", () => {
 });
 
 test("only classified read-only requests enter the queue without approval", () => {
-  const request = buildHermesRequestData({
-    kind: "briefing.generate",
-    title: "Generate brief",
-  });
+  for (const kind of ["briefing.generate", "diagnostic.status"]) {
+    const request = buildHermesRequestData({
+      kind,
+      title: "Read-only request",
+      sideEffecting: true,
+    });
 
-  assert.equal(request.sideEffecting, false);
-  assert.equal(request.status, "queued");
+    assert.equal(request.sideEffecting, false, kind);
+    assert.equal(request.status, "queued", kind);
+  }
 });

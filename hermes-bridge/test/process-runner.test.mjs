@@ -25,6 +25,23 @@ test("user content remains a single argument and never becomes a shell command",
   assert.equal(command.args.length, 2);
 });
 
+test("diagnostic status always builds one fixed bounded command", () => {
+  const title = "Hermes status check --verbose";
+  const prompt = "gateway; echo arbitrary prompt text";
+  const command = buildHermesCommand({
+    kind: "diagnostic.status",
+    title,
+    prompt,
+  });
+
+  assert.deepEqual(command, {
+    args: ["status"],
+    timeoutMs: 12_000,
+  });
+  assert.equal(command.args.includes(title), false);
+  assert.equal(command.args.includes(prompt), false);
+});
+
 test("Hermes executable validation rejects control characters", () => {
   assert.equal(validateExecutable("hermes"), "hermes");
   assert.throws(() => validateExecutable("hermes\n--unsafe"), /control/i);

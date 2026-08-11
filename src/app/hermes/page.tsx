@@ -182,6 +182,48 @@ function HealthChip({ health }: { health: Health | null }) {
   );
 }
 
+function StatusCheckAction({ onDone }: { onDone: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const runStatusCheck = async () => {
+    if (busy) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const response = await fetch("/api/hermes/dispatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "diagnostic.status",
+          title: "Hermes status check",
+        }),
+      });
+      if (!response.ok) throw new Error("status request failed");
+      setNotice("Status check queued.");
+      onDone();
+    } catch {
+      setNotice("Status check failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <Button size="sm" onClick={runStatusCheck} disabled={busy}>
+        <ActivityIcon className="w-3.5 h-3.5" />
+        {busy ? "Queuing…" : "Run status check"}
+      </Button>
+      {notice && (
+        <span role="status" className="text-[10.5px] text-[var(--text-3)]">
+          {notice}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ── Dispatch bar ──────────────────────────────────────────
 function DispatchBar({ onDone }: { onDone: () => void }) {
   const [text, setText] = useState("");
@@ -720,6 +762,7 @@ export default function HermesPage() {
   const [unavailable, setUnavailable] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [dispatchRefreshKey, setDispatchRefreshKey] = useState(0);
 
   const load = useCallback(async () => {
     const healthResult = await fetchHermesJSON<Health>("/api/hermes/health");
@@ -789,6 +832,11 @@ export default function HermesPage() {
     setLoaded(true);
   }, []);
 
+  const refreshAfterDispatch = useCallback(() => {
+    setDispatchRefreshKey((key) => key + 1);
+    void load();
+  }, [load]);
+
   useEffect(() => {
     const initial = setTimeout(load, 0);
     const iv = setInterval(load, 8000);
@@ -816,8 +864,9 @@ export default function HermesPage() {
               Hermes
             </h1>
           </div>
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-start gap-2.5">
             <HealthChip health={health} />
+            <StatusCheckAction onDone={refreshAfterDispatch} />
             <button
               type="button"
               onClick={manualRefresh}
@@ -853,12 +902,12 @@ export default function HermesPage() {
           <>
             {/* Dispatch */}
             <div className="hq-rise">
-              <DispatchBar onDone={load} />
+              <DispatchBar onDone={refreshAfterDispatch} />
             </div>
 
             {/* Dispatches — what you've sent Hermes + live status/results */}
             <section className="mt-12">
-              <HermesDispatches />
+              <HermesDispatches refreshKey={dispatchRefreshKey} />
             </section>
 
         {/* Approval inbox */}

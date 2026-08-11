@@ -23,6 +23,7 @@ const REQUEST_POLICIES = Object.freeze({
   "memory.update": RISK_LEVELS.LOCAL_WRITE,
   "memory.remove": RISK_LEVELS.DESTRUCTIVE,
   "briefing.generate": RISK_LEVELS.READ_ONLY,
+  "diagnostic.status": RISK_LEVELS.READ_ONLY,
 });
 
 export class UnknownRequestKindError extends Error {

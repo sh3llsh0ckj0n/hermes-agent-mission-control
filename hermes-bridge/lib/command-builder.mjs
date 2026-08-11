@@ -34,6 +34,14 @@ export function parseRequestPayload(request) {
 
 export function buildHermesCommand(request, { board = "default", runTimeoutMs = 240_000 } = {}) {
   const policy = classifyRequestKind(request?.kind);
+
+  if (policy.kind === "diagnostic.status") {
+    return {
+      args: ["status"],
+      timeoutMs: 12_000,
+    };
+  }
+
   const title = requiredString(request?.title, "Request title", 200);
   const prompt = typeof request?.prompt === "string" ? request.prompt : "";
 

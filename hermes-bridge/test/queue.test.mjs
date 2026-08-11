@@ -54,7 +54,8 @@ test("concurrent claim calls receive disjoint request rows from an atomic query"
   assert.equal(claimCalls.length, 2);
   for (const call of claimCalls) {
     const [safeKinds, approvedKinds, limit] = call.params;
-    assert.deepEqual(safeKinds, ["briefing.generate"]);
+    assert.deepEqual(safeKinds, ["briefing.generate", "diagnostic.status"]);
+    assert.equal(approvedKinds.includes("diagnostic.status"), false);
     assert.ok(approvedKinds.includes("oneshot"));
     assert.ok(approvedKinds.includes("memory.write"));
     assert.ok(approvedKinds.includes("cron.remove"));

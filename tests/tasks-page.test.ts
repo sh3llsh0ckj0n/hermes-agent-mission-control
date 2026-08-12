@@ -13,6 +13,17 @@ test("enabled Tasks page reads only the Hermes task endpoint", () => {
   assert.doesNotMatch(tasksPageSource, /["']\/api\/tasks["']/);
 });
 
+test("Tasks page queues only a title and waits for the mirrored task", () => {
+  assert.match(tasksPageSource, /New task/);
+  assert.match(tasksPageSource, /method:\s*["']POST["']/);
+  assert.match(tasksPageSource, /body:\s*JSON\.stringify\(\{ title: normalizedTitle \}\)/);
+  assert.match(tasksPageSource, /Task queued for approval\./);
+  assert.match(tasksPageSource, /will not be created until you approve it/);
+  assert.match(tasksPageSource, /href=["']\/hermes["']/);
+  assert.doesNotMatch(tasksPageSource, /setTaskData\([^)]*normalizedTitle/);
+  assert.doesNotMatch(tasksPageSource, /assignee:\s*normalizedTitle|priority:\s*normalizedTitle/);
+});
+
 test("enabled Tasks page contains no Notion or fabricated-task assumptions", () => {
   assert.doesNotMatch(tasksPageSource, /Synced with Notion/i);
   assert.doesNotMatch(tasksPageSource, /Add Task/i);

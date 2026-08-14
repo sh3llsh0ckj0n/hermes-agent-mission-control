@@ -21,7 +21,7 @@ export interface RouteAccess {
 
 interface ApiOwnership {
   path: string;
-  match: "exact" | "prefix";
+  match: "exact" | "prefix" | "task-action";
   moduleIds: readonly ModuleId[];
 }
 
@@ -39,6 +39,7 @@ export const API_ROUTE_OWNERSHIP: readonly ApiOwnership[] = [
   { path: "/api/hermes/memory", match: "exact", moduleIds: ["hermes", "memory-wiki"] },
   { path: "/api/hermes/requests", match: "prefix", moduleIds: ["home", "hermes"] },
   { path: "/api/hermes/tasks", match: "exact", moduleIds: ["home", "hermes", "tasks"] },
+  { path: "/api/hermes/tasks", match: "task-action", moduleIds: ["hermes", "tasks"] },
 
   // The base endpoint is read by Content OS and X, and written by Watchlist.
   { path: "/api/x-content", match: "exact", moduleIds: ["content", "x", "watchlist"] },
@@ -82,8 +83,17 @@ const PUBLIC_SYSTEM_PATHS = new Set([
   "/window.svg",
 ]);
 
-function matchesPath(pathname: string, path: string, match: "exact" | "prefix") {
-  return pathname === path || (match === "prefix" && pathname.startsWith(`${path}/`));
+function matchesPath(
+  pathname: string,
+  path: string,
+  match: "exact" | "prefix" | "task-action",
+) {
+  if (match === "exact") return pathname === path;
+  if (match === "prefix") return pathname === path || pathname.startsWith(`${path}/`);
+  if (match !== "task-action" || !pathname.startsWith(`${path}/`)) return false;
+
+  const segments = pathname.slice(path.length + 1).split("/");
+  return segments.length === 2 && Boolean(segments[0]) && segments[1] === "action";
 }
 
 function isSystemPath(pathname: string) {

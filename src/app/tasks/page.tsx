@@ -14,6 +14,12 @@ import {
 } from "@/components/ui/kit";
 import { fetchHermesJSON } from "@/lib/hermes-client";
 import { taskBoardEmptyMessage, taskBucket } from "@/lib/dashboard";
+import {
+  taskActionLabel,
+  taskActionsForStatus,
+  type HermesBlockKind,
+  type HermesTaskAction,
+} from "@/lib/hermes-task-actions";
 
 interface HermesTask {
   id: string;
@@ -69,6 +75,10 @@ export default function TasksPage() {
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [taskData, setTaskData] = useState<HermesTasksResponse | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [taskAction, setTaskAction] = useState<{
+    task: HermesTask;
+    action: HermesTaskAction;
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -163,11 +173,21 @@ export default function TasksPage() {
             />
           </Panel>
         ) : (
-          <TaskColumns tasks={tasks} />
+          <TaskColumns
+            tasks={tasks}
+            onAction={(task, action) => setTaskAction({ task, action })}
+          />
         )}
       </div>
 
       {editorOpen && <NewTaskEditor onClose={() => setEditorOpen(false)} />}
+      {taskAction && (
+        <TaskActionEditor
+          task={taskAction.task}
+          action={taskAction.action}
+          onClose={() => setTaskAction(null)}
+        />
+      )}
     </>
   );
 }
@@ -307,7 +327,13 @@ function NewTaskEditor({ onClose }: { onClose: () => void }) {
   );
 }
 
-function TaskColumns({ tasks }: { tasks: HermesTask[] }) {
+function TaskColumns({
+  tasks,
+  onAction,
+}: {
+  tasks: HermesTask[];
+  onAction: (task: HermesTask, action: HermesTaskAction) => void;
+}) {
   const grouped = COLUMNS.reduce<Record<TaskColumn, HermesTask[]>>(
     (columns, column) => {
       columns[column.id] = [];
@@ -339,7 +365,12 @@ function TaskColumns({ tasks }: { tasks: HermesTask[] }) {
             {grouped[column.id]
               .sort((left, right) => (right.priority ?? 0) - (left.priority ?? 0))
               .map((task) => (
-                <TaskCard key={task.id} task={task} tone={column.tone} />
+                <TaskCard
+                  key={task.id}
+                  task={task}
+                  tone={column.tone}
+                  onAction={onAction}
+                />
               ))}
             {grouped[column.id].length === 0 && (
               <p className="py-8 text-center text-[12.5px] text-[var(--text-4)]">
@@ -356,11 +387,14 @@ function TaskColumns({ tasks }: { tasks: HermesTask[] }) {
 function TaskCard({
   task,
   tone,
+  onAction,
 }: {
   task: HermesTask;
   tone: "neutral" | "accent" | "up";
+  onAction: (task: HermesTask, action: HermesTaskAction) => void;
 }) {
   const result = resultPreview(task.result);
+  const actions = taskActionsForStatus(task.status);
 
   return (
     <article
@@ -394,7 +428,278 @@ function TaskCard({
           {result}
         </p>
       )}
+
+      {actions.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-1.5 border-t border-[var(--line)] pt-3">
+          {actions.map((action) => (
+            <button
+              key={action}
+              type="button"
+              onClick={() => onAction(task, action)}
+              className="btn-ghost px-2.5 py-1 text-[11px]"
+            >
+              {taskActionLabel(action)}
+            </button>
+          ))}
+        </div>
+      )}
     </article>
+  );
+}
+
+const ACTION_BUTTON_LABELS: Readonly<Record<HermesTaskAction, string>> = {
+  complete: "Queue completion",
+  block: "Queue block",
+  unblock: "Queue unblock",
+  promote: "Queue promotion",
+  archive: "Queue archive",
+};
+
+const BLOCK_KIND_OPTIONS: ReadonlyArray<{
+  value: "" | HermesBlockKind;
+  label: string;
+}> = [
+  { value: "", label: "Generic" },
+  { value: "needs_input", label: "Needs input" },
+  { value: "capability", label: "Capability" },
+  { value: "dependency", label: "Dependency" },
+  { value: "transient", label: "Transient" },
+];
+
+function TaskActionEditor({
+  task,
+  action,
+  onClose,
+}: {
+  task: HermesTask;
+  action: HermesTaskAction;
+  onClose: () => void;
+}) {
+  const [result, setResult] = useState("");
+  const [reason, setReason] = useState("");
+  const [blockKind, setBlockKind] = useState<"" | HermesBlockKind>("");
+  const [submitting, setSubmitting] = useState(false);
+  const [queued, setQueued] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const label = taskActionLabel(action);
+  const blockReasonMissing = action === "block" && !reason.trim();
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (submitting || blockReasonMissing) return;
+
+    const body: Record<string, string> = { action };
+    if (action === "complete" && result.trim()) body.result = result.trim();
+    if ((action === "block" || action === "unblock" || action === "promote") && reason.trim()) {
+      body.reason = reason.trim();
+    }
+    if (action === "block" && blockKind) body.blockKind = blockKind;
+
+    setSubmitting(true);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/hermes/tasks/${encodeURIComponent(task.id)}/action`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      if (!response.ok) {
+        const responseBody = await response.json().catch(() => ({}));
+        setError(
+          typeof responseBody.error === "string"
+            ? responseBody.error
+            : "Could not queue task action.",
+        );
+        setSubmitting(false);
+        return;
+      }
+      setQueued(true);
+    } catch {
+      setError("Could not connect to the Hermes approval queue.");
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end">
+      <button
+        type="button"
+        aria-label="Close task action editor"
+        onClick={onClose}
+        className="absolute inset-0 bg-black/50"
+        style={{ backdropFilter: "blur(2px)" }}
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="task-action-title"
+        className="elevated relative h-full w-full max-w-md overflow-y-auto p-6 animate-[hq-rise_0.3s_ease]"
+      >
+        <div className="mb-6 flex items-start justify-between gap-4">
+          <div>
+            <Eyebrow>Approval required</Eyebrow>
+            <h2
+              id="task-action-title"
+              className="mt-1.5 text-[22px] font-semibold tracking-[-0.02em] text-[var(--text)]"
+            >
+              {label} task
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="btn-ghost inline-flex h-9 w-9 shrink-0 items-center justify-center"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {queued ? (
+          <div className="flex flex-col items-center justify-center py-16 text-center">
+            <div
+              className="mb-4 flex h-12 w-12 items-center justify-center rounded-full"
+              style={{
+                background: "color-mix(in srgb, var(--up) 14%, transparent)",
+                border: "1px solid color-mix(in srgb, var(--up) 30%, transparent)",
+              }}
+            >
+              <Check className="h-6 w-6 text-[var(--up)]" />
+            </div>
+            <Pill tone="neutral">Queued for approval</Pill>
+            <p className="mt-4 text-[15px] font-medium text-[var(--text)]">
+              {action === "complete"
+                ? "Completion queued for approval."
+                : `${label} request queued for approval.`}
+            </p>
+            <p className="mt-2 max-w-xs text-[12.5px] leading-relaxed text-[var(--text-3)]">
+              The task will remain unchanged until the request is approved and processed by Hermes.
+            </p>
+            <Button href="/hermes" variant="primary" className="mt-5">
+              Go to Hermes
+            </Button>
+          </div>
+        ) : (
+          <form onSubmit={submit} className="space-y-5">
+            <div className="rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-2)] p-3.5">
+              <p className="text-[10px] uppercase tracking-[0.12em] text-[var(--text-3)]">
+                Mirrored task
+              </p>
+              <p className="mt-1.5 text-[13px] leading-relaxed text-[var(--text)]">
+                {task.title}
+              </p>
+            </div>
+
+            {action === "complete" && (
+              <div>
+                <label htmlFor="task-result" className="eyebrow mb-2 block">
+                  Result summary (optional)
+                </label>
+                <textarea
+                  id="task-result"
+                  value={result}
+                  onChange={(event) => setResult(event.target.value)}
+                  maxLength={2000}
+                  rows={5}
+                  autoFocus
+                  className="w-full resize-y rounded-[10px] border border-[var(--line)] bg-transparent px-3.5 py-2.5 text-[14px] text-[var(--text)] outline-none transition-colors placeholder:text-[var(--text-3)] focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)]"
+                  placeholder="What was completed?"
+                />
+              </div>
+            )}
+
+            {action === "block" && (
+              <>
+                <div>
+                  <label htmlFor="task-block-reason" className="eyebrow mb-2 block">
+                    Reason
+                  </label>
+                  <textarea
+                    id="task-block-reason"
+                    value={reason}
+                    onChange={(event) => setReason(event.target.value)}
+                    maxLength={1000}
+                    rows={4}
+                    required
+                    autoFocus
+                    className="w-full resize-y rounded-[10px] border border-[var(--line)] bg-transparent px-3.5 py-2.5 text-[14px] text-[var(--text)] outline-none transition-colors placeholder:text-[var(--text-3)] focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)]"
+                    placeholder="What is blocking this task?"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="task-block-kind" className="eyebrow mb-2 block">
+                    Block type
+                  </label>
+                  <select
+                    id="task-block-kind"
+                    value={blockKind}
+                    onChange={(event) => setBlockKind(event.target.value as "" | HermesBlockKind)}
+                    className="w-full rounded-[10px] border border-[var(--line)] bg-[var(--surface-1)] px-3.5 py-2.5 text-[14px] text-[var(--text)] outline-none"
+                  >
+                    {BLOCK_KIND_OPTIONS.map((option) => (
+                      <option key={option.value || "generic"} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </>
+            )}
+
+            {(action === "unblock" || action === "promote") && (
+              <div>
+                <label htmlFor="task-audit-reason" className="eyebrow mb-2 block">
+                  Audit reason (optional)
+                </label>
+                <textarea
+                  id="task-audit-reason"
+                  value={reason}
+                  onChange={(event) => setReason(event.target.value)}
+                  maxLength={1000}
+                  rows={4}
+                  autoFocus
+                  className="w-full resize-y rounded-[10px] border border-[var(--line)] bg-transparent px-3.5 py-2.5 text-[14px] text-[var(--text)] outline-none transition-colors placeholder:text-[var(--text-3)] focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)]"
+                  placeholder="Why is this lifecycle change appropriate?"
+                />
+              </div>
+            )}
+
+            {action === "archive" && (
+              <div className="rounded-[var(--r-md)] border border-[color-mix(in_srgb,var(--warn)_28%,transparent)] bg-[color-mix(in_srgb,var(--warn)_8%,transparent)] p-4">
+                <p className="text-[13px] font-medium text-[var(--text)]">
+                  Confirm archive
+                </p>
+                <p className="mt-1.5 text-[12.5px] leading-relaxed text-[var(--text-3)]">
+                  This archives the task. It does not permanently delete it.
+                </p>
+              </div>
+            )}
+
+            {error && (
+              <p role="alert" className="text-[12.5px] text-[var(--down)]">
+                {error}
+              </p>
+            )}
+
+            <div className="flex items-center gap-2">
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={submitting || blockReasonMissing}
+              >
+                {submitting ? "Queueing…" : ACTION_BUTTON_LABELS[action]}
+              </Button>
+              <Button variant="ghost" onClick={onClose}>
+                Cancel
+              </Button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>
   );
 }
 

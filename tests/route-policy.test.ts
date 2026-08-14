@@ -119,11 +119,17 @@ test("system auth APIs and enabled Hermes APIs remain available", () => {
     "/api/hermes/requests",
     "/api/hermes/requests/request-1",
     "/api/hermes/tasks",
+    "/api/hermes/tasks/task-1/action",
   ]) {
     const route = classifyRouteAccess(pathname, "");
     assert.equal(route.kind, "module-api", pathname);
     assert.equal(route.available, true, pathname);
   }
+
+  assert.equal(
+    classifyRouteAccess("/api/hermes/tasks/task-1/unknown", "").kind,
+    "unknown",
+  );
 });
 
 test("unknown application and API routes are not treated as enabled modules", () => {

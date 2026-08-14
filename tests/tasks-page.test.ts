@@ -24,6 +24,21 @@ test("Tasks page queues only a title and waits for the mirrored task", () => {
   assert.doesNotMatch(tasksPageSource, /assignee:\s*normalizedTitle|priority:\s*normalizedTitle/);
 });
 
+test("Tasks page exposes only state-authorized lifecycle actions", () => {
+  assert.match(tasksPageSource, /taskActionsForStatus\(task\.status\)/);
+  assert.match(tasksPageSource, /\/api\/hermes\/tasks\/\$\{encodeURIComponent\(task\.id\)\}\/action/);
+  assert.match(tasksPageSource, /Queue completion/);
+  assert.match(tasksPageSource, /This archives the task\. It does not permanently delete it\./);
+  assert.match(tasksPageSource, /Queued for approval/);
+  assert.doesNotMatch(tasksPageSource, /--force|--rm/);
+});
+
+test("lifecycle submission does not optimistically mutate mirrored task state", () => {
+  const editorSource = tasksPageSource.slice(tasksPageSource.indexOf("function TaskActionEditor"));
+  assert.doesNotMatch(editorSource, /setTaskData|task\.status\s*=|setTasks/);
+  assert.match(editorSource, /will remain unchanged until the request is approved/);
+});
+
 test("enabled Tasks page contains no Notion or fabricated-task assumptions", () => {
   assert.doesNotMatch(tasksPageSource, /Synced with Notion/i);
   assert.doesNotMatch(tasksPageSource, /Add Task/i);

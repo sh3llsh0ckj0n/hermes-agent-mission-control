@@ -15,6 +15,7 @@ import { buildHermesCommand, parseRequestPayload } from "./lib/command-builder.m
 import { BridgeError, classifyError, sanitizeErrorMessage, ValidationError } from "./lib/errors.mjs";
 import { parseHermesInsights } from "./lib/insights-parser.mjs";
 import { createLogger } from "./lib/logger.mjs";
+import { readKanbanTasksReadOnly } from "./lib/kanban-reader.mjs";
 import { parseGatewayStatus, persistKanbanMirror } from "./lib/mirror-state.mjs";
 import { checkHermesCompatibility, runProcess, validateExecutable } from "./lib/process-runner.mjs";
 import { claimRequests } from "./lib/queue.mjs";
@@ -151,12 +152,7 @@ async function setStore(key, data) {
 async function mirrorKanban() {
   let tasks = [];
   try {
-    // Supported Hermes releases expect --board before the kanban subcommand.
-    const out = await hermes(["kanban", "--board", BOARD, "list", "--json"], {
-      timeoutMs: 15_000,
-    });
-    const parsed = JSON.parse(out || "[]");
-    tasks = Array.isArray(parsed) ? parsed : parsed.tasks || [];
+    tasks = readKanbanTasksReadOnly({ board: BOARD });
   } catch (error) {
     log("warn", "kanban_mirror_failed", {
       category: classifyError(error).category,

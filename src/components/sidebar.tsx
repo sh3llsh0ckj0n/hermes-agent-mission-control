@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
-import { Menu, X } from "lucide-react";
+import { ArrowLeft, Menu, X } from "lucide-react";
 import {
   getEnabledModules,
   getModuleForPath,
@@ -12,6 +12,25 @@ import {
 
 const navGroups = getNavigationGroups();
 const mobileTabs = getEnabledModules().slice(0, 5);
+
+// PalmOS is the browser home base; Mission Control links back to it.
+// Set NEXT_PUBLIC_PALMOS_URL to an empty string to hide the link.
+const PALMOS_URL =
+  process.env.NEXT_PUBLIC_PALMOS_URL ?? "http://palmos-dashboard.tail71fdc9.ts.net:3000/";
+
+function PalmOSLink({ compact = false }: { compact?: boolean }) {
+  if (!PALMOS_URL) return null;
+  return (
+    <a
+      href={PALMOS_URL}
+      className="flex items-center gap-1.5 text-[var(--text-2)] hover:text-[var(--text)] transition-colors text-[12.5px] font-medium"
+      aria-label="Back to PalmOS"
+    >
+      <ArrowLeft className="w-4 h-4" />
+      {compact ? "PalmOS" : "Back to PalmOS"}
+    </a>
+  );
+}
 
 function Logo() {
   return (
@@ -51,6 +70,7 @@ export function Sidebar() {
       {/* Mobile header */}
       <div className="md:hidden fixed top-0 left-0 right-0 z-50 bg-[var(--bg)]/90 backdrop-blur-xl border-b border-[var(--line)] px-4 py-3 flex items-center justify-between">
         <Logo />
+        <PalmOSLink compact />
         <button
           onClick={() => setIsOpen(!isOpen)}
           className="p-2 text-[var(--text-2)] hover:text-[var(--text)] transition-colors rounded-lg hover:bg-[var(--surface-1)]"
@@ -154,7 +174,8 @@ export function Sidebar() {
         </nav>
 
         {/* Footer */}
-        <div className="px-4 py-4 border-t border-[var(--line)]">
+        <div className="px-4 py-4 border-t border-[var(--line)] space-y-2">
+          <PalmOSLink />
           <p className="text-[var(--text-3)] text-[11.5px]">Hermes operational workspace</p>
         </div>
       </aside>

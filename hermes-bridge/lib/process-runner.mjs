@@ -152,7 +152,7 @@ export function runProcess(executable, args, {
 }
 
 function parseVersion(output) {
-  const match = String(output).match(/(?:^|\s)v?(\d+)\.(\d+)\.(\d+)(?:\s|$)/);
+  const match = String(output).match(/(?:^|\s)v?(\d+)\.(\d+)\.(\d+)(?:\+[0-9A-Za-z.-]+)?(?:\s|$)/);
   return match ? match.slice(1, 4).map(Number) : null;
 }
 

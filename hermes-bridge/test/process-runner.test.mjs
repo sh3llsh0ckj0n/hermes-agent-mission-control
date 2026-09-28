@@ -107,6 +107,18 @@ test("CLI compatibility check accepts the exact Hermes Agent v0.20 output", asyn
   assert.equal(compatible, "0.20.0");
 });
 
+test("CLI compatibility check reads Hermes build metadata before Python version", async () => {
+  const compatible = await checkHermesCompatibility({
+    executable: "hermes",
+    maximumVersionExclusive: "0.22.0",
+    run: async () => ({
+      stdout: "Hermes Agent v0.21.5+2372.g678a476.dirty (2026.9.24) · upstream 678a4762\nInstall directory: /home/jonny/.hermes/hermes-agent\nInstall method: git\nPython: 3.14.7\nOpenAI SDK: 2.24.0\n",
+      stderr: "",
+    }),
+  });
+  assert.equal(compatible, "0.21.5");
+});
+
 test("CLI compatibility check rejects malformed and out-of-range versions", async () => {
   for (const output of [
     "Hermes version unknown",

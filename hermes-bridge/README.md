@@ -77,11 +77,19 @@ HERMES_BOARD=default
 HERMES_WIKI=/var/lib/hermes-bridge/wiki
 BRIDGE_POLL_MS=5000
 BRIDGE_MIRROR_MS=30000
+BRIDGE_CRON_MIRROR_MS=300000
+BRIDGE_COST_MIRROR_MS=900000
 BRIDGE_RUN_TIMEOUT_MS=240000
 BRIDGE_CLAIM_BATCH_SIZE=1
 BRIDGE_MAX_RETRY_ATTEMPTS=3
 BRIEF_HOUR=8
+BRIEF_TIMEOUT_MS=600000
 ```
+
+Health and the kanban mirror run every `BRIDGE_MIRROR_MS`. Crons and cost come from
+slower Hermes CLI calls and refresh on their own intervals (crons also refresh right
+after any `cron.*` request). The daily brief runs once per local calendar day at or after
+`BRIEF_HOUR`, in the background, with its own `BRIEF_TIMEOUT_MS`.
 
 Do not put the environment file in this repository, a systemd unit, shell
 history, or process arguments.

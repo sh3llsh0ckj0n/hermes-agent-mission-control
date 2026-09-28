@@ -20,6 +20,7 @@ import { parseGatewayStatus, persistKanbanMirror } from "./lib/mirror-state.mjs"
 import { checkHermesCompatibility, runProcess, validateExecutable } from "./lib/process-runner.mjs";
 import { claimRequests } from "./lib/queue.mjs";
 import { classifyRequestKind } from "./lib/request-policy.mjs";
+import { createIntervalGate, localDateKey } from "./lib/schedule.mjs";
 import { withBoundedRetry } from "./lib/retry.mjs";
 import { parseDatabaseTransport } from "./lib/tls.mjs";
 import { createWikiPathGuard } from "./lib/wiki-path.mjs";
@@ -61,6 +62,10 @@ const RUN_TIMEOUT_MS = integerEnv("BRIDGE_RUN_TIMEOUT_MS", 240_000, {
   min: 1_000,
   max: 3_600_000,
 });
+// Each Hermes CLI call costs 2-4 CPU-seconds, so slow-changing mirrors run less often
+// than the tick. Health and kanban still run every tick; crons also refresh after cron.* requests.
+const CRON_MIRROR_MS = integerEnv("BRIDGE_CRON_MIRROR_MS", 300_000, { min: 1_000, max: 86_400_000 });
+const COST_MIRROR_MS = integerEnv("BRIDGE_COST_MIRROR_MS", 900_000, { min: 1_000, max: 86_400_000 });
 const CLAIM_BATCH_SIZE = integerEnv("BRIDGE_CLAIM_BATCH_SIZE", 1, { min: 1, max: 10 });
 const MAX_RETRY_ATTEMPTS = integerEnv("BRIDGE_MAX_RETRY_ATTEMPTS", 3, { min: 1, max: 5 });
 const HERMES_MIN_VERSION = process.env.HERMES_MIN_VERSION || "0.17.0";
@@ -70,6 +75,8 @@ const WIKI_PATHS = createWikiPathGuard(
   process.env.HERMES_WIKI || path.join(os.homedir(), ".hermes", "wiki"),
 );
 const BRIEF_HOUR = integerEnv("BRIEF_HOUR", 8, { min: 0, max: 23 });
+// The brief is an open-ended agent run that routinely takes 3-4 minutes.
+const BRIEF_TIMEOUT_MS = integerEnv("BRIEF_TIMEOUT_MS", 600_000, { min: 1_000, max: 3_600_000 });
 const BRIEF_PROMPT =
   "You are the operator's chief of staff. Produce today's brief. Read the configured memory wiki, " +
   "the kanban board, and recent activity. Output ONLY valid JSON (no prose, no code fences) in exactly " +
@@ -94,6 +101,8 @@ const pool = new pg.Pool({
 
 const shutdownController = new AbortController();
 let lastBriefDate = null;
+let activeBrief = null;
+const mirrorGate = createIntervalGate();
 let shuttingDown = false;
 let queueTimer = null;
 let mirrorTimer = null;
@@ -397,7 +406,7 @@ async function gitCommitWiki(relativePath) {
 }
 
 async function generateBriefing() {
-  const raw = (await hermes(["-z", BRIEF_PROMPT], { timeoutMs: RUN_TIMEOUT_MS })).trim();
+  const raw = (await hermes(["-z", BRIEF_PROMPT], { timeoutMs: BRIEF_TIMEOUT_MS })).trim();
   let brief;
   try {
     const jsonText = raw.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
@@ -411,20 +420,34 @@ async function generateBriefing() {
   await emit("status", "Daily brief generated", { level: "up" });
 }
 
+async function lastStoredBriefDate() {
+  const { rows } = await q(
+    `SELECT data->>'generatedAt' AS "generatedAt" FROM "DataStore" WHERE key = 'hermes-briefing'`,
+  );
+  const generatedAt = rows[0]?.generatedAt ? new Date(rows[0].generatedAt) : null;
+  return generatedAt && !Number.isNaN(generatedAt.getTime()) ? localDateKey(generatedAt) : "";
+}
+
+// Starts the daily brief in the background so a long agent run never delays
+// the health and kanban mirrors.
 async function maybeDailyBrief() {
+  if (activeBrief) return;
+  // A restart should not produce a second brief for a day that already has one.
+  if (lastBriefDate === null) lastBriefDate = await lastStoredBriefDate();
   const now = new Date();
-  const today = now.toISOString().slice(0, 10);
-  if (now.getHours() >= BRIEF_HOUR && lastBriefDate !== today) {
-    lastBriefDate = today;
-    try {
-      await generateBriefing();
-    } catch (error) {
+  const today = localDateKey(now);
+  if (now.getHours() < BRIEF_HOUR || lastBriefDate === today) return;
+  lastBriefDate = today;
+  activeBrief = generateBriefing()
+    .catch((error) => {
       log("warn", "daily_brief_failed", {
         category: classifyError(error).category,
         error: sanitizeErrorMessage(error?.message),
       });
-    }
-  }
+    })
+    .finally(() => {
+      activeBrief = null;
+    });
 }
 
 async function executeRequest(request) {
@@ -436,8 +459,9 @@ async function executeRequest(request) {
     return `wrote ${relativePath}`;
   }
   if (request.kind === "briefing.generate") {
+    if (activeBrief) await activeBrief;
     await generateBriefing();
-    lastBriefDate = new Date().toISOString().slice(0, 10);
+    lastBriefDate = localDateKey();
     return "brief updated";
   }
 
@@ -563,15 +587,17 @@ async function processQueue() {
 
 async function mirrorTick() {
   const mirrors = [
-    ["kanban", mirrorKanban],
-    ["crons", mirrorCrons],
-    ["health", mirrorHealth],
-    ["wiki", mirrorWiki],
-    ["cost", mirrorCost],
-    ["briefing", maybeDailyBrief],
+    ["kanban", mirrorKanban, 0],
+    ["crons", mirrorCrons, CRON_MIRROR_MS],
+    ["health", mirrorHealth, 0],
+    ["wiki", mirrorWiki, 0],
+    ["cost", mirrorCost, COST_MIRROR_MS],
+    ["briefing", maybeDailyBrief, 0],
   ];
-  for (const [name, mirror] of mirrors) {
+  for (const [name, mirror, intervalMs] of mirrors) {
     if (shuttingDown) return;
+    if (!mirrorGate.isDue(name, intervalMs)) continue;
+    mirrorGate.markRun(name);
     try {
       await mirror();
     } catch (error) {
@@ -621,9 +647,10 @@ async function shutdown(signalName) {
   shutdownController.abort();
   log("info", "bridge_shutdown_started", { signal: signalName });
 
-  if (activeQueue) {
+  for (const active of [activeQueue, activeBrief]) {
+    if (!active) continue;
     await Promise.race([
-      activeQueue.catch(() => {}),
+      active.catch(() => {}),
       new Promise((resolve) => setTimeout(resolve, 10_000)),
     ]);
   }
@@ -663,6 +690,10 @@ async function main() {
     board: BOARD,
     pollMs: POLL_MS,
     mirrorMs: MIRROR_MS,
+    cronMirrorMs: CRON_MIRROR_MS,
+    costMirrorMs: COST_MIRROR_MS,
+    briefHour: BRIEF_HOUR,
+    briefTimeoutMs: BRIEF_TIMEOUT_MS,
     claimBatchSize: CLAIM_BATCH_SIZE,
     tlsMode: transport.tlsMode,
   });

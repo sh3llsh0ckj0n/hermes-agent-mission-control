@@ -69,3 +69,18 @@ test("gateway reports stopped only for an explicit negative status", () => {
     "stopped",
   );
 });
+
+test("kanban mirror writes stay scoped to their own board", async () => {
+  const calls = [];
+  await persistKanbanMirror({
+    tasks: [{ id: "t_1", title: "one", status: "todo" }],
+    board: "rigspecs-production-integrity",
+    storeKey: "hermes-tasks:rigspecs-production-integrity",
+    query: async (text, params) => calls.push({ text, params }),
+    setStore: async (key) => calls.push({ key }),
+  });
+  assert.match(calls[0].text, /WHERE "HermesTask"\.board = EXCLUDED\.board/);
+  assert.match(calls[1].text, /DELETE FROM "HermesTask" WHERE board=\$1 AND id <> ALL/);
+  assert.equal(calls[1].params[0], "rigspecs-production-integrity");
+  assert.equal(calls[2].key, "hermes-tasks:rigspecs-production-integrity");
+});

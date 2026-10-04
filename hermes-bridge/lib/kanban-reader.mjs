@@ -60,6 +60,87 @@ export function resolveKanbanDbPath({
   return path.join(root, "kanban", "boards", slug, "kanban.db");
 }
 
+const SNAPSHOT_TASK_COLUMNS = [
+  "id",
+  "title",
+  "assignee",
+  "status",
+  "priority",
+  "result",
+  "created_at",
+  "started_at",
+  "completed_at",
+  "block_kind",
+  "idempotency_key",
+  "project_id",
+  "current_run_id",
+];
+const SNAPSHOT_RUN_COLUMNS = [
+  "id",
+  "task_id",
+  "status",
+  "outcome",
+  "started_at",
+  "ended_at",
+  "summary",
+  "metadata",
+];
+
+function availableColumns(database, table, wanted) {
+  const present = new Set(
+    database.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name),
+  );
+  return wanted.filter((column) => present.has(column));
+}
+
+/**
+ * Everything reconciliation needs from one board, read in one read-only
+ * connection: tasks (including archived, so history stays visible) and their
+ * runs. Columns are probed first so older Hermes schemas degrade to NULLs
+ * instead of failing.
+ */
+export function readKanbanBoardSnapshotReadOnly({
+  board = "default",
+  env = process.env,
+  homeDir = os.homedir(),
+  databaseFactory = (filename) => new DatabaseSync(filename, { readOnly: true }),
+} = {}) {
+  const filename = resolveKanbanDbPath({ board, env, homeDir });
+  if (!fs.existsSync(filename)) {
+    throw new BridgeError("hermes_state_read_failure", "Hermes kanban database was not found", {
+      retryable: true,
+    });
+  }
+
+  let database;
+  try {
+    database = databaseFactory(filename);
+    const taskColumns = availableColumns(database, "tasks", SNAPSHOT_TASK_COLUMNS);
+    const runColumns = availableColumns(database, "task_runs", SNAPSHOT_RUN_COLUMNS);
+    const tasks = database
+      .prepare(`SELECT ${taskColumns.join(", ")} FROM tasks ORDER BY created_at ASC, id ASC`)
+      .all();
+    const runs = runColumns.length
+      ? database
+          .prepare(`SELECT ${runColumns.join(", ")} FROM task_runs ORDER BY started_at ASC, id ASC`)
+          .all()
+      : [];
+    return { board: normalizeBoardSlug(board), tasks, runs };
+  } catch (error) {
+    throw new BridgeError(
+      "hermes_state_read_failure",
+      error?.message || "Could not read Hermes kanban database",
+      { retryable: true, cause: error },
+    );
+  } finally {
+    try {
+      database?.close();
+    } catch {
+      // Read-only snapshot cleanup is best-effort.
+    }
+  }
+}
+
 export function readKanbanTasksReadOnly({
   board = "default",
   env = process.env,

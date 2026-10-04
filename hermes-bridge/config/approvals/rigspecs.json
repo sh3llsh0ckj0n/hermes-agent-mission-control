@@ -1,0 +1,80 @@
+{
+  "schema": "mc-approvals/v1",
+  "project_id": "rigspecs",
+  "comment": "Approval ledger. Only status \"granted\" with approver, decided_at and (when a package exists) the exact package_sha256 counts as approval. Anything else blocks execution. Entries are appended or superseded, never deleted.",
+  "approvals": [
+    {
+      "approval_id": "rigspecs-approval-a",
+      "scope": "Passwordless SELECT-only audit role provisioning (PB-06)",
+      "requested_action": "Provision rigspecs_auditor_ro",
+      "status": "unrecorded",
+      "approver": null,
+      "decided_at": null,
+      "package_id": "audit/docs/APPROVAL_A_PACKAGE.md",
+      "package_sha256": null,
+      "execution_boundary": "Role provisioning only; no credential activation",
+      "note": "No machine-readable decision is on record. Kanban shows PB-06 blocked awaiting Jonathan."
+    },
+    {
+      "approval_id": "rigspecs-approval-b",
+      "scope": "Audit role activation window B2-B7",
+      "requested_action": "Enable LOGIN, verify read-only posture, restore NOLOGIN",
+      "status": "unrecorded",
+      "approver": null,
+      "decided_at": null,
+      "package_id": "audit/docs/APPROVAL_B_EXECUTION_PACKAGE.md",
+      "package_sha256": null,
+      "execution_boundary": "B2-B7 only; NOLOGIN restored at B7",
+      "note": "An execution receipt exists (2026-09-18) but the grant (approver, time, package hash) is not recorded here. Not inferred."
+    },
+    {
+      "approval_id": "rigspecs-batch-6",
+      "scope": "Correction batch 6 (Group A field corrections, Group B containment)",
+      "requested_action": "Execute CORRECTION-BATCH-6-A.sql and CORRECTION-BATCH-6-B.sql against production",
+      "status": "waiting",
+      "approver": null,
+      "decided_at": null,
+      "package_id": "continuation-20260914/correction-batch-6-20260915/manifest.json",
+      "package_sha256": "cc4045edf2e5a483217d33828a7f1004dd11948e1f4b5c8bcc9746db9d720b34",
+      "execution_boundary": "8 Group A rows (sku/officialUrl/msrp/updatedAt), 18 Group B rows (isDraft/updatedAt)",
+      "note": "Sealed REVIEW ONLY package. Requires Jonathan's explicit approval sentence.",
+      "package_path": "~/hermes/artifacts/rigspecs-integrity/continuation-20260914/correction-batch-6-20260915/manifest.json"
+    },
+    {
+      "approval_id": "rigspecs-launch-indexing",
+      "scope": "Public launch and search indexing",
+      "requested_action": "Remove global noindex and robots Disallow",
+      "status": "not_requested",
+      "approver": null,
+      "decided_at": null,
+      "package_id": null,
+      "package_sha256": null,
+      "execution_boundary": "Indexing flags only",
+      "note": "Gated on the INTEGRITY_LOCKED launch target; not yet requested."
+    },
+    {
+      "approval_id": "rigspecs-affiliate-enrollment",
+      "scope": "Affiliate program enrollment (ARB / AvantLink, Amazon Associates)",
+      "requested_action": "Enroll and create affiliate links",
+      "status": "not_requested",
+      "approver": null,
+      "decided_at": null,
+      "package_id": "commercial/ARB-AFFILIATE-PACKAGE.md",
+      "package_sha256": null,
+      "execution_boundary": "No enrollment or agreement without explicit approval",
+      "note": "Research packages exist; no decision recorded."
+    }
+  ],
+  "gates": [
+    {
+      "task_id": "rigspecs-production-integrity/t_2014dc2c",
+      "approval_id": "rigspecs-approval-a",
+      "comment": "PB-06 Approval A decision card"
+    },
+    {
+      "task_id": "rigspecs-production-integrity/t_13b6c099",
+      "approval_id": "rigspecs-approval-a",
+      "comment": "PB-02 depends on an approved, separately provisioned audit credential"
+    }
+  ]
+}

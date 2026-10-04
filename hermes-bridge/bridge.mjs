@@ -16,6 +16,11 @@ import { BridgeError, classifyError, sanitizeErrorMessage, ValidationError } fro
 import { parseHermesInsights } from "./lib/insights-parser.mjs";
 import { createLogger } from "./lib/logger.mjs";
 import { readKanbanTasksReadOnly } from "./lib/kanban-reader.mjs";
+import { resolveBoardAllowlist } from "./lib/boards.mjs";
+import { mcSchemaReady, persistReconciliation } from "./lib/mc-persist.mjs";
+import { resolveProjectAllowlist } from "./lib/project-config.mjs";
+import { runProjectReconciliation } from "./lib/project-reconciler.mjs";
+import { resolveReconcileMode } from "./lib/reconcile.mjs";
 import { parseGatewayStatus, persistKanbanMirror } from "./lib/mirror-state.mjs";
 import { checkHermesCompatibility, runProcess, validateExecutable } from "./lib/process-runner.mjs";
 import { claimRequests } from "./lib/queue.mjs";
@@ -56,6 +61,11 @@ const INSTANCE_ID = createInstanceId();
 const log = createLogger({ instanceId: INSTANCE_ID });
 const HERMES = validateExecutable(process.env.HERMES_BIN || "hermes");
 const BOARD = process.env.HERMES_BOARD || "default";
+// Read-only mirror allowlist. Unset HERMES_BOARDS keeps the single HERMES_BOARD.
+const BOARDS = resolveBoardAllowlist(process.env);
+// Reconciliation is opt-in per project (MC_PROJECTS); none are enabled by default.
+const MC_PROJECTS = resolveProjectAllowlist(process.env);
+const RECONCILE_MODE = resolveReconcileMode(process.env.RECONCILE_MODE);
 const POLL_MS = integerEnv("BRIDGE_POLL_MS", 5_000, { min: 250, max: 3_600_000 });
 const MIRROR_MS = integerEnv("BRIDGE_MIRROR_MS", 30_000, { min: 1_000, max: 3_600_000 });
 const RUN_TIMEOUT_MS = integerEnv("BRIDGE_RUN_TIMEOUT_MS", 240_000, {
@@ -65,6 +75,7 @@ const RUN_TIMEOUT_MS = integerEnv("BRIDGE_RUN_TIMEOUT_MS", 240_000, {
 // Each Hermes CLI call costs 2-4 CPU-seconds, so slow-changing mirrors run less often
 // than the tick. Health and kanban still run every tick; crons also refresh after cron.* requests.
 const CRON_MIRROR_MS = integerEnv("BRIDGE_CRON_MIRROR_MS", 300_000, { min: 1_000, max: 86_400_000 });
+const RECONCILE_MS = integerEnv("BRIDGE_RECONCILE_MS", 300_000, { min: 1_000, max: 86_400_000 });
 const COST_MIRROR_MS = integerEnv("BRIDGE_COST_MIRROR_MS", 900_000, { min: 1_000, max: 86_400_000 });
 const CLAIM_BATCH_SIZE = integerEnv("BRIDGE_CLAIM_BATCH_SIZE", 1, { min: 1, max: 10 });
 const MAX_RETRY_ATTEMPTS = integerEnv("BRIDGE_MAX_RETRY_ATTEMPTS", 3, { min: 1, max: 5 });
@@ -159,23 +170,90 @@ async function setStore(key, data) {
 }
 
 async function mirrorKanban() {
-  let tasks = [];
-  try {
-    tasks = readKanbanTasksReadOnly({ board: BOARD });
-  } catch (error) {
-    log("warn", "kanban_mirror_failed", {
-      category: classifyError(error).category,
-      error: sanitizeErrorMessage(error?.message),
+  for (const board of BOARDS) {
+    let tasks = [];
+    try {
+      tasks = readKanbanTasksReadOnly({ board });
+    } catch (error) {
+      log("warn", "kanban_mirror_failed", {
+        board,
+        category: classifyError(error).category,
+        error: sanitizeErrorMessage(error?.message),
+      });
+      continue;
+    }
+
+    await persistKanbanMirror({
+      tasks,
+      board,
+      query: q,
+      setStore,
+      // The primary board keeps the original marker key the dashboard reads.
+      storeKey: board === BOARD ? "hermes-tasks" : `hermes-tasks:${board}`,
     });
+  }
+}
+
+let mcSchemaWarned = false;
+
+/**
+ * Reconcile each enabled project from Kanban snapshots and receipts, read-only
+ * on the Hermes side. This release only ever previews: it records normalized
+ * state and proposed repairs in Mission Control and never writes to Kanban.
+ */
+async function reconcileProjects() {
+  if (!MC_PROJECTS.length || RECONCILE_MODE === "off") return;
+  if (!(await mcSchemaReady(q))) {
+    if (!mcSchemaWarned) log("warn", "mc_schema_missing", { projects: MC_PROJECTS });
+    mcSchemaWarned = true;
     return;
   }
 
-  await persistKanbanMirror({
-    tasks,
-    board: BOARD,
-    query: q,
-    setStore,
-  });
+  for (const projectId of MC_PROJECTS) {
+    let run;
+    try {
+      run = runProjectReconciliation(projectId);
+    } catch (error) {
+      log("warn", "reconcile_failed", {
+        project: projectId,
+        category: classifyError(error).category,
+        error: sanitizeErrorMessage(error?.message),
+      });
+      continue;
+    }
+    const outside = run.config.boards.filter((board) => !BOARDS.includes(board));
+    if (outside.length) {
+      log("warn", "reconcile_board_not_allowlisted", { project: projectId, boards: outside });
+      continue;
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const summary = await persistReconciliation({
+        query: (text, params) => client.query(text, params),
+        run,
+        mode: "preview",
+      });
+      await client.query("COMMIT");
+      log("info", "reconcile_preview", {
+        project: projectId,
+        ...summary,
+        counts: run.reconciliation.counts,
+        required: run.reconciliation.required.length,
+        safeRepairs: run.reconciliation.intents.length,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      log("warn", "reconcile_persist_failed", {
+        project: projectId,
+        category: classifyError(error).category,
+        error: sanitizeErrorMessage(error?.message),
+      });
+    } finally {
+      client.release();
+    }
+  }
 }
 
 async function mirrorCrons() {
@@ -588,6 +666,7 @@ async function processQueue() {
 async function mirrorTick() {
   const mirrors = [
     ["kanban", mirrorKanban, 0],
+    ["reconcile", reconcileProjects, RECONCILE_MS],
     ["crons", mirrorCrons, CRON_MIRROR_MS],
     ["health", mirrorHealth, 0],
     ["wiki", mirrorWiki, 0],
@@ -688,6 +767,9 @@ async function main() {
     platform: process.platform,
     architecture: process.arch,
     board: BOARD,
+    boards: BOARDS,
+    mcProjects: MC_PROJECTS,
+    reconcileMode: RECONCILE_MODE,
     pollMs: POLL_MS,
     mirrorMs: MIRROR_MS,
     cronMirrorMs: CRON_MIRROR_MS,
@@ -697,6 +779,10 @@ async function main() {
     claimBatchSize: CLAIM_BATCH_SIZE,
     tlsMode: transport.tlsMode,
   });
+  if (RECONCILE_MODE === "apply") {
+    // Kanban repair execution is not part of this release; apply degrades to preview.
+    log("warn", "reconcile_apply_unavailable", { effectiveMode: "preview" });
+  }
   await emit("status", "Bridge connected", {
     level: "up",
     meta: {

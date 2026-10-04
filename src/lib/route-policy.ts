@@ -40,6 +40,8 @@ export const API_ROUTE_OWNERSHIP: readonly ApiOwnership[] = [
   { path: "/api/hermes/requests", match: "prefix", moduleIds: ["home", "hermes"] },
   { path: "/api/hermes/tasks", match: "exact", moduleIds: ["home", "hermes", "tasks"] },
   { path: "/api/hermes/tasks", match: "task-action", moduleIds: ["hermes", "tasks"] },
+  // Mission Control normalized state (read-only): projects, tasks, receipts, reconciliation.
+  { path: "/api/mc", match: "prefix", moduleIds: ["home", "hermes"] },
 
   // The base endpoint is read by Content OS and X, and written by Watchlist.
   { path: "/api/x-content", match: "exact", moduleIds: ["content", "x", "watchlist"] },

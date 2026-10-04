@@ -36,7 +36,9 @@ website <── mirror tables ─ PostgreSQL <── local state ─── bridg
 - A dedicated operating-system account and a least-privilege database role
 
 The database role needs only the tables used by the bridge:
-`AgentRequest`, `AgentEvent`, `HermesTask`, `HermesMemory`, and `DataStore`.
+`AgentRequest`, `AgentEvent`, `HermesTask`, `HermesMemory`, and `DataStore`,
+plus the Mission Control tables granted by the `1_mission_control_reconciliation`
+migration (no DELETE; the audit ledger and event log are append-only).
 Grant only the required `SELECT`, `INSERT`, `UPDATE`, and `DELETE` privileges.
 Do not use a database owner or migration role for the service.
 
@@ -84,6 +86,19 @@ BRIDGE_CLAIM_BATCH_SIZE=1
 BRIDGE_MAX_RETRY_ATTEMPTS=3
 BRIEF_HOUR=8
 BRIEF_TIMEOUT_MS=600000
+```
+
+Optional Mission Control reconciliation (see `docs/MISSION_CONTROL_RECONCILIATION.md`).
+Leaving these unset keeps the original single-board behaviour:
+
+```dotenv
+# Read-only Kanban mirror allowlist (defaults to HERMES_BOARD)
+HERMES_BOARDS=default,rigspecs-production-integrity
+# Projects to reconcile; requires the 1_mission_control_reconciliation migration
+MC_PROJECTS=rigspecs
+# off | preview (apply degrades to preview in this release)
+RECONCILE_MODE=preview
+BRIDGE_RECONCILE_MS=300000
 ```
 
 Health and the kanban mirror run every `BRIDGE_MIRROR_MS`. Crons and cost come from

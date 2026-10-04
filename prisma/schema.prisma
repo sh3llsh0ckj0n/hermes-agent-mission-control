@@ -517,3 +517,114 @@ model HermesMemory {
   @@index([type])
   @@index([status])
 }
+
+// ─── Mission Control normalized state (reconciliation layer) ─────
+// Written by the bridge from Kanban snapshots + execution receipts.
+// Precedence: verified receipt > Mission Control run > Kanban.
+// All tables are additive; nothing here alters the Hermes bus tables.
+
+model McProject {
+  id               String    @id // stable project_id, e.g. "rigspecs"
+  name             String
+  boards           String[]
+  state            Json? // derived mission state (milestones, launch metrics)
+  reconcileMode    String    @default("preview") // off | preview | apply
+  lastReconciledAt DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+}
+
+model McTaskState {
+  id                    String   @id // "<board>/<kanban task id>"
+  projectId             String
+  board                 String
+  kanbanId              String
+  idempotencyKey        String?
+  title                 String
+  kanbanStatus          String
+  normalizedStatus      String // TODO|READY|IN_PROGRESS|REVIEW|BLOCKED|WAITING_APPROVAL|DONE|FAILED|ARCHIVED|UNKNOWN
+  classification        String // consistent|kanban_only|stale_safe_repair|reconciliation_required|waiting_approval|archived
+  kanbanStale           Boolean  @default(false)
+  evidence              Json // linked receipts with basis + integrity
+  reasons               Json
+  recommendedResolution String?
+  reconciliationVersion String
+  reconciledAt          DateTime
+  updatedAt             DateTime @updatedAt
+
+  @@unique([board, kanbanId])
+  @@index([projectId, classification])
+  @@index([projectId, normalizedStatus])
+}
+
+model McReceipt {
+  id             String    @id // "sha256:<hex>" of the receipt bytes
+  projectId      String
+  label          String
+  kind           String    @default("execution")
+  paths          String[]
+  result         String // PASS|FAIL|PARTIAL|NOT_EXECUTED|UNKNOWN
+  rawResult      String?
+  qcVerdict      String?
+  finishedAt     DateTime?
+  actionRequired Boolean   @default(false)
+  integrity      String // verified|mismatch|not-listed|unverified
+  identity       Json? // embedded project_id/task_id/run_id
+  firstSeenAt    DateTime  @default(now())
+  lastSeenAt     DateTime  @default(now())
+
+  @@index([projectId])
+}
+
+// Append-only audit ledger. Rows are inserted, never updated or deleted.
+model McReconciliation {
+  id                      String   @id @default(cuid())
+  intentId                String // rec_* (repair) or rr_* (reconciliation required)
+  mode                    String // preview | apply
+  projectId               String
+  taskId                  String?
+  board                   String?
+  outcome                 String // proposed_repair|reconciliation_required|repair_pending_execution|applied
+  oldStatus               String?
+  newStatus               String?
+  reason                  String
+  authoritativeEvidenceId String?
+  detail                  Json?
+  reconciliationVersion   String
+  createdAt               DateTime @default(now())
+
+  @@unique([intentId, mode])
+  @@index([projectId, createdAt])
+  @@index([taskId])
+}
+
+model McApproval {
+  id                String    @id // approval_id
+  projectId         String
+  scope             String
+  requestedAction   String
+  status            String // not_requested|waiting|granted|rejected|invalidated|executed|unrecorded
+  packageId         String?
+  packageSha256     String?
+  packageMatches    Boolean?
+  approver          String?
+  decidedAt         DateTime?
+  executionBoundary String?
+  updatedAt         DateTime  @updatedAt
+
+  @@index([projectId, status])
+}
+
+// Replay-safe event log: ids are deterministic, so re-emitting is a no-op.
+model McEvent {
+  id         String   @id // sha-derived, stable per (type, subject, fact)
+  type       String // task.*, receipt.*, approval.*, kanban.*, project.*
+  projectId  String?
+  subjectId  String
+  payload    Json
+  occurredAt DateTime
+  recordedAt DateTime @default(now())
+
+  @@index([projectId, occurredAt])
+  @@index([type])
+}

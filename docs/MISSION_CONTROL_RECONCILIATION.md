@@ -126,12 +126,31 @@ The bridge is not given general Kanban write authority.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `HERMES_BOARDS` | unset → `[HERMES_BOARD]` | Comma-separated read-only mirror allowlist |
+| `HERMES_BOARD` | `default` | The **primary board**: the only board mirrored into `HermesTask` and the only board actions run against |
+| `HERMES_BOARDS` | unset → `[HERMES_BOARD]` | Comma-separated boards the bridge may *read* for reconciliation; never widens the mirror or action scope |
 | `MC_PROJECTS` | unset → none | Projects to reconcile; their boards must be in the allowlist |
 | `RECONCILE_MODE` | `preview` | `off` \| `preview` (`apply` → preview) |
 | `BRIDGE_RECONCILE_MS` | `300000` | Reconciliation interval |
 
 With none of these set, the bridge behaves exactly as before.
+
+### Board safety
+
+Kanban task ids are only unique within a board, and `HermesTask` is keyed by
+id alone, so it holds the primary board only. Other boards are visible
+read-only via reconciliation state (`McTaskState`, keyed by board + id).
+
+- `GET /api/hermes/tasks` returns the primary board (`HERMES_PRIMARY_BOARD` on
+  Mission Control, default `default`; keep it equal to the bridge's
+  `HERMES_BOARD`). `?board=<slug>` returns another board read-only
+  (`actionable: false`). Existing callers, including PalmOS's task count, keep
+  the primary-board scope.
+- `POST /api/hermes/tasks/:id/action` refuses (409) a client-named non-primary
+  board before any lookup, and refuses any stored task whose board is not the
+  primary board, before an AgentRequest is created. The board is recorded in
+  the request payload from the stored row.
+- The bridge refuses to execute a Kanban request whose recorded board differs
+  from its own `HERMES_BOARD`.
 
 To enable the RigSpecs pilot later (requires the migration first):
 

@@ -99,9 +99,11 @@ const taskRouteSource = readFileSync(
 );
 
 test("task GET still reads mirrored HermesTask rows and the synchronization marker", () => {
-  const getSource = taskRouteSource.match(/export async function GET[\s\S]*?^}\r?$/m);
+  // GET delegates to handleTaskListRequest, which reads the primary board's mirror.
+  assert.match(taskRouteSource, /export async function GET[\s\S]*?handleTaskListRequest\(req\)/);
+  const getSource = taskRouteSource.match(/export async function handleTaskListRequest[\s\S]*?^}\r?$/m);
   assert.ok(getSource);
-  assert.match(getSource[0], /prisma\.hermesTask\.findMany/);
+  assert.match(getSource[0], /prisma\.hermesTask\.findMany\(\{\s*where: \{ board \}/);
   assert.match(getSource[0], /prisma\.dataStore\.findUnique/);
   assert.match(getSource[0], /resolveHermesTasksLastSync/);
 });

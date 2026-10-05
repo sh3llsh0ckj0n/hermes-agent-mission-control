@@ -211,3 +211,15 @@ test("board snapshot reader is read-only, includes runs, and tolerates older sch
   assert.equal(first.reconciliation.counts.archived, 1);
   assert.deepEqual(fs.readFileSync(dbPath), before);
 });
+
+test("only the primary board is mirrored or actionable; other boards are read-only", async () => {
+  const { resolveBridgeBoards } = await import("../lib/boards.mjs");
+  assert.deepEqual(resolveBridgeBoards({}), { primary: "default", mirror: ["default"], readable: ["default"] });
+  const enabled = resolveBridgeBoards({ HERMES_BOARD: "default", HERMES_BOARDS: "default,rigspecs-production-integrity" });
+  assert.deepEqual(enabled.mirror, ["default"]);
+  assert.deepEqual(enabled.readable, ["default", "rigspecs-production-integrity"]);
+  // An allowlist that omits the primary board still never mirrors anything else.
+  const omitted = resolveBridgeBoards({ HERMES_BOARD: "default", HERMES_BOARDS: "rigspecs-production-integrity" });
+  assert.deepEqual(omitted.mirror, ["default"]);
+  assert.deepEqual(omitted.readable, ["default", "rigspecs-production-integrity"]);
+});

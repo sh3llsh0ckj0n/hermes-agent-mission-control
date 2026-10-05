@@ -109,6 +109,14 @@ export function buildHermesCommand(request, { board = "default", runTimeoutMs = 
     const payload = parseRequestPayload(request);
     const configuredBoard = requiredString(board, "Hermes board", 200);
     const taskId = requiredPositionalString(payload.taskId, "Kanban task ID", 500);
+    // Task ids are only unique within a board. A request built for another
+    // board must never run against this one. Requests queued before the board
+    // was recorded carry none and keep their original (primary-board) meaning.
+    if (payload.board !== undefined && payload.board !== null && payload.board !== configuredBoard) {
+      throw new ValidationError(
+        `Kanban request targets board ${String(payload.board).slice(0, 64)}; this bridge acts only on ${configuredBoard}`,
+      );
+    }
 
     if (policy.kind === "kanban.complete") {
       const result = optionalString(payload.result, "Kanban result", 2_000);

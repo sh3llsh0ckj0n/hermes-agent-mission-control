@@ -16,7 +16,7 @@ import { BridgeError, classifyError, sanitizeErrorMessage, ValidationError } fro
 import { parseHermesInsights } from "./lib/insights-parser.mjs";
 import { createLogger } from "./lib/logger.mjs";
 import { readKanbanTasksReadOnly } from "./lib/kanban-reader.mjs";
-import { resolveBoardAllowlist } from "./lib/boards.mjs";
+import { resolveBridgeBoards } from "./lib/boards.mjs";
 import { mcSchemaReady, persistReconciliation } from "./lib/mc-persist.mjs";
 import { resolveProjectAllowlist } from "./lib/project-config.mjs";
 import { runProjectReconciliation } from "./lib/project-reconciler.mjs";
@@ -60,9 +60,12 @@ function createInstanceId() {
 const INSTANCE_ID = createInstanceId();
 const log = createLogger({ instanceId: INSTANCE_ID });
 const HERMES = validateExecutable(process.env.HERMES_BIN || "hermes");
-const BOARD = process.env.HERMES_BOARD || "default";
-// Read-only mirror allowlist. Unset HERMES_BOARDS keeps the single HERMES_BOARD.
-const BOARDS = resolveBoardAllowlist(process.env);
+// HERMES_BOARD is the primary board: the only one mirrored into HermesTask and
+// the only one actions run against. HERMES_BOARDS adds boards that may be read
+// for reconciliation; it never widens the mirror or the action scope.
+const BRIDGE_BOARDS = resolveBridgeBoards(process.env);
+const BOARD = BRIDGE_BOARDS.primary;
+const BOARDS = BRIDGE_BOARDS.readable;
 // Reconciliation is opt-in per project (MC_PROJECTS); none are enabled by default.
 const MC_PROJECTS = resolveProjectAllowlist(process.env);
 const RECONCILE_MODE = resolveReconcileMode(process.env.RECONCILE_MODE);
@@ -170,7 +173,7 @@ async function setStore(key, data) {
 }
 
 async function mirrorKanban() {
-  for (const board of BOARDS) {
+  for (const board of BRIDGE_BOARDS.mirror) {
     let tasks = [];
     try {
       tasks = readKanbanTasksReadOnly({ board });
@@ -188,8 +191,7 @@ async function mirrorKanban() {
       board,
       query: q,
       setStore,
-      // The primary board keeps the original marker key the dashboard reads.
-      storeKey: board === BOARD ? "hermes-tasks" : `hermes-tasks:${board}`,
+      storeKey: "hermes-tasks",
     });
   }
 }
@@ -767,7 +769,8 @@ async function main() {
     platform: process.platform,
     architecture: process.arch,
     board: BOARD,
-    boards: BOARDS,
+    mirroredBoards: BRIDGE_BOARDS.mirror,
+    readableBoards: BOARDS,
     mcProjects: MC_PROJECTS,
     reconcileMode: RECONCILE_MODE,
     pollMs: POLL_MS,

@@ -134,3 +134,19 @@ test("kanban archive cannot produce permanent purge arguments", () => {
     /cannot be an option/i,
   );
 });
+
+test("kanban actions refuse a request recorded for another board", () => {
+  const request = (board) => ({
+    kind: "kanban.complete",
+    title: "Complete task",
+    prompt: JSON.stringify({ taskId: "t_same", ...(board === undefined ? {} : { board }) }),
+  });
+  const ok = buildHermesCommand(request("default"), { board: "default" });
+  assert.deepEqual(ok.args.slice(0, 4), ["kanban", "--board", "default", "complete"]);
+  assert.throws(
+    () => buildHermesCommand(request("rigspecs-production-integrity"), { board: "default" }),
+    /targets board rigspecs-production-integrity; this bridge acts only on default/,
+  );
+  // Older queued requests without a recorded board keep their primary-board meaning.
+  assert.deepEqual(buildHermesCommand(request(undefined), { board: "default" }).args.slice(0, 3), ["kanban", "--board", "default"]);
+});

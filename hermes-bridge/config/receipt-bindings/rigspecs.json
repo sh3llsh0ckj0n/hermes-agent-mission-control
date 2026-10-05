@@ -1,0 +1,6 @@
+{
+  "schema": "mc-receipt-bindings/v1",
+  "project_id": "rigspecs",
+  "comment": "Explicit receipt-to-task bindings for historical receipts that do not carry their own identity. A binding names the receipt by content hash (sha256), so it can never transfer to changed bytes. Only status \"approved\" (with approved_by and approved_at) is authoritative. Titles are never used as a basis.",
+  "bindings": []
+}

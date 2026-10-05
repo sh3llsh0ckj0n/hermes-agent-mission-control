@@ -1,0 +1,188 @@
+{
+  "schema": "mc-project/v1",
+  "project_id": "rigspecs",
+  "name": "RigSpecs",
+  "description": "Evidence-driven, approval-gated catalog integrity and launch work for rigspecs.com.",
+  "boards": [
+    "rigspecs-production-integrity"
+  ],
+  "evidence_roots": [
+    "~/hermes/projects/rigspec-site/audit/reports",
+    "~/hermes/artifacts/rigspecs-integrity"
+  ],
+  "bindings_file": "../receipt-bindings/rigspecs.json",
+  "approvals_file": "../approvals/rigspecs.json",
+  "receipt_sources": [
+    {
+      "label": "Approval B B2-B7 execution",
+      "path": "~/hermes/projects/rigspec-site/audit/reports/approval-b-b2-b7/APPROVAL_B_B2_B7_REPORT.md",
+      "parser": "markdown-report",
+      "integrity": {
+        "method": "sha256sums",
+        "manifest": "SHA256SUMS.txt"
+      }
+    },
+    {
+      "label": "Approval B admin pre-activation gate (2026-09-16)",
+      "path": "~/hermes/projects/rigspec-site/audit/reports/APPROVAL_B_ADMIN_PREACTIVATION_RESULT_2026-09-16.json",
+      "parser": "json-status"
+    },
+    {
+      "label": "Approval B admin pre-activation gate (2026-09-18)",
+      "path": "~/hermes/projects/rigspec-site/audit/reports/APPROVAL_B_ADMIN_PREACTIVATION_RESULT_2026-09-18.json",
+      "parser": "json-status"
+    },
+    {
+      "label": "Approval B extensions denial gate",
+      "path": "~/hermes/projects/rigspec-site/audit/reports/APPROVAL_B_DENIAL_GATE_RESULT_2026-09-16.json",
+      "parser": "json-status",
+      "result_map": {
+        "EXTENSIONS_DENIAL_GATE_PASSED": "PASS"
+      }
+    },
+    {
+      "label": "Approval B extensions capability window",
+      "path": "~/hermes/projects/rigspec-site/audit/reports/APPROVAL_B_EXTENSIONS_CAPABILITY_WINDOW_RESULT_2026-09-16.json",
+      "parser": "json-status",
+      "result_map": {
+        "EXTENSIONS_CAPABILITY_WINDOW_BLOCKED": "FAIL"
+      },
+      "finished_at": "2026-09-16"
+    },
+    {
+      "label": "Audit access window (2026-09-12)",
+      "path": "~/hermes/artifacts/rigspecs-integrity/access-window-20260912/window-result.json",
+      "parser": "json-status",
+      "result_map": {
+        "FAILED_RECONTAINED": "FAIL"
+      }
+    },
+    {
+      "label": "Quarantine execution (2026-09-12)",
+      "path": "~/hermes/artifacts/rigspecs-integrity/quarantine-execution-20260912-2224/quarantine-receipt.json",
+      "parser": "json-status"
+    },
+    {
+      "label": "Containment execution (2026-09-15)",
+      "path": "~/hermes/artifacts/rigspecs-integrity/continuation-20260914/containment-execution-20260915/execution-receipt.json",
+      "parser": "json-status"
+    },
+    {
+      "label": "Correction batches 4 and 5 execution",
+      "path": "~/hermes/artifacts/rigspecs-integrity/continuation-20260914/batches-45-execute/execution-receipt.json",
+      "parser": "json-status"
+    },
+    {
+      "label": "Integrity purchase module deployment",
+      "path": "~/hermes/artifacts/rigspecs-integrity/continuation-20260914/deployment-20260915/DEPLOYMENT-RECEIPT.md",
+      "parser": "markdown-report"
+    }
+  ],
+  "receipt_discovery": {
+    "comment": "Future receipts written by workers as mc-receipt/v1 JSON are discovered automatically under these roots.",
+    "file_name": "mc-receipt.json",
+    "max_depth": 6
+  },
+  "metrics_sources": [
+    {
+      "id": "promoted_catalog",
+      "path": "~/hermes/artifacts/rigspecs-integrity/continuation-20260914/promoted-catalog/PROMOTED-CATALOG.json",
+      "as_of_field": "generatedAt",
+      "fields": {
+        "integrity_locked_current": "counts.INTEGRITY_LOCKED",
+        "published_products": "counts.publishedProducts",
+        "contained_products": "counts.draftOrContained",
+        "promoted_catalog_count": "promotedProducts#length",
+        "revenue_ready_count": "counts.REVENUE_READY",
+        "revenue_eligible_count": "counts.REVENUE_ELIGIBLE",
+        "indexing_launch_enabled": "indexing.launchEnabled",
+        "indexing_global_noindex": "indexing.globalNoindex"
+      }
+    }
+  ],
+  "launch": {
+    "metric": "integrity_locked_current",
+    "target": 10,
+    "comparison": ">="
+  },
+  "milestones": [
+    {
+      "id": "production-trust",
+      "name": "Production Trust",
+      "type": "tasks",
+      "tasks": [
+        "rigspecs-production-integrity/t_23da2c52",
+        "rigspecs-production-integrity/t_13b6c099",
+        "rigspecs-production-integrity/t_7982ce5f",
+        "rigspecs-production-integrity/t_4c464b92",
+        "rigspecs-production-integrity/t_8857b8c7",
+        "rigspecs-production-integrity/t_2014dc2c",
+        "rigspecs-production-integrity/t_2f69cfc5"
+      ]
+    },
+    {
+      "id": "approval-b",
+      "name": "Approval B",
+      "type": "receipt",
+      "receipt_label": "Approval B B2-B7 execution"
+    },
+    {
+      "id": "tls-verify-full",
+      "name": "TLS verify-full remediation",
+      "type": "receipt-action",
+      "receipt_label": "Approval B B2-B7 execution",
+      "note": "The B2-B7 receipt records sslmode=require (not verify-full) and requires a decision on a verify-full re-run."
+    },
+    {
+      "id": "batch-6",
+      "name": "Batch 6",
+      "type": "approval",
+      "approval_id": "rigspecs-batch-6"
+    },
+    {
+      "id": "integrity-locked",
+      "name": "Integrity Locked",
+      "type": "launch"
+    },
+    {
+      "id": "promoted-catalog",
+      "name": "Promoted Catalog",
+      "type": "metric",
+      "metric": "promoted_catalog_count"
+    },
+    {
+      "id": "launch-indexing",
+      "name": "Launch / Indexing",
+      "type": "indexing",
+      "approval_id": "rigspecs-launch-indexing"
+    },
+    {
+      "id": "revenue-readiness",
+      "name": "Revenue Readiness",
+      "type": "metric",
+      "metric": "revenue_ready_count"
+    },
+    {
+      "id": "affiliate-actions",
+      "name": "Affiliate Actions",
+      "type": "approval",
+      "approval_id": "rigspecs-affiliate-enrollment"
+    },
+    {
+      "id": "ip-protection",
+      "name": "IP Protection",
+      "type": "tasks",
+      "tasks": [
+        "rigspecs-production-integrity/t_75c431b0",
+        "rigspecs-production-integrity/t_f7275353",
+        "rigspecs-production-integrity/t_31435e61",
+        "rigspecs-production-integrity/t_beffaffb",
+        "rigspecs-production-integrity/t_0b947b36",
+        "rigspecs-production-integrity/t_078bba55",
+        "rigspecs-production-integrity/t_287c0671",
+        "rigspecs-production-integrity/t_0765750f",
+        "rigspecs-production-integrity/t_84c7501d"
+      ]
+    }
+  ]
+}

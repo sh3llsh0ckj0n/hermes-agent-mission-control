@@ -43,11 +43,17 @@ export function parseGatewayStatus(output) {
   return value ? classifyGatewayValue(value[1]) : "unknown";
 }
 
+/**
+ * Mirror one board. Every statement is scoped to that board: an id that also
+ * exists on another board is never moved or overwritten, and cleanup only
+ * removes rows of this board.
+ */
 export async function persistKanbanMirror({
   tasks,
   board,
   query,
   setStore,
+  storeKey = "hermes-tasks",
   now = () => new Date(),
 }) {
   const seen = new Set();
@@ -60,7 +66,8 @@ export async function persistKanbanMirror({
        VALUES ($1,$2,$3,$4,$5,$6,$7, now(), now())
        ON CONFLICT (id) DO UPDATE SET
          title=EXCLUDED.title, assignee=EXCLUDED.assignee, status=EXCLUDED.status,
-         priority=EXCLUDED.priority, result=EXCLUDED.result, "syncedAt"=now()`,
+         priority=EXCLUDED.priority, result=EXCLUDED.result, "syncedAt"=now()
+       WHERE "HermesTask".board = EXCLUDED.board`,
       [
         id,
         board,
@@ -87,6 +94,6 @@ export async function persistKanbanMirror({
     total: seen.size,
     syncedAt: now().toISOString(),
   };
-  await setStore("hermes-tasks", marker);
+  await setStore(storeKey, marker);
   return marker;
 }

@@ -92,7 +92,8 @@ Optional Mission Control reconciliation (see `docs/MISSION_CONTROL_RECONCILIATIO
 Leaving these unset keeps the original single-board behaviour:
 
 ```dotenv
-# Read-only Kanban mirror allowlist (defaults to HERMES_BOARD)
+# Boards readable for reconciliation (defaults to HERMES_BOARD). Only HERMES_BOARD
+# is ever mirrored into HermesTask or acted on.
 HERMES_BOARDS=default,rigspecs-production-integrity
 # Projects to reconcile; requires the 1_mission_control_reconciliation migration
 MC_PROJECTS=rigspecs

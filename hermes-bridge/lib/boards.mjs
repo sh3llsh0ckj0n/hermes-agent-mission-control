@@ -34,6 +34,22 @@ export function resolveBoardAllowlist(env = process.env) {
   return Object.freeze(boards);
 }
 
+/**
+ * The bridge's board roles. Only the primary board (HERMES_BOARD) is mirrored
+ * into HermesTask and is actionable; HermesTask is keyed by Kanban id alone,
+ * and ids are only unique within a board. Every other allowlisted board is
+ * read for reconciliation only (McTaskState is keyed by board + id).
+ */
+export function resolveBridgeBoards(env = process.env) {
+  const primary = normalizeBoardSlug(env.HERMES_BOARD || "default");
+  const allowlist = resolveBoardAllowlist(env);
+  return Object.freeze({
+    primary,
+    mirror: Object.freeze([primary]),
+    readable: Object.freeze(allowlist.includes(primary) ? [...allowlist] : [primary, ...allowlist]),
+  });
+}
+
 /** Qualified task identity: board slug + Hermes task id. Unique across boards. */
 export function qualifiedTaskId(board, kanbanId) {
   return `${normalizeBoardSlug(board)}/${String(kanbanId)}`;

@@ -16,12 +16,16 @@ function actionRequest(body: unknown): Request {
   });
 }
 
-function dependencies(task: { id: string; title: string; status: string } | null) {
+function dependencies(
+  task: { id: string; title: string; status: string; board?: string } | null,
+  primaryBoard = "default",
+) {
   const created: Array<Record<string, unknown>> = [];
   return {
     created,
     value: {
-      findTask: async () => task,
+      primaryBoard,
+      findTask: async () => (task ? { board: "default", ...task } : null),
       createAgentRequest: async (data: Record<string, unknown>) => {
         created.push(data);
         return { id: "request-1", ...data };
@@ -120,7 +124,6 @@ test("client fields cannot override mirrored identity or server policy", async (
       risk: "read_only",
       sideEffecting: false,
       status: "queued",
-      board: "attacker-board",
     }),
     "trusted-task",
     deps.value,
@@ -134,6 +137,7 @@ test("client fields cannot override mirrored identity or server policy", async (
   assert.equal(created.status, "awaiting_approval");
   assert.deepEqual(JSON.parse(String(created.prompt)), {
     taskId: "trusted-task",
+    board: "default",
     result: "Done",
   });
 });

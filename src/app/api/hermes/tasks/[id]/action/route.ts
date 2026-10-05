@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { isBoardSlug, resolvePrimaryBoard } from "@/lib/hermes-boards";
 import { buildHermesRequestData } from "@/lib/hermes-request";
 import { withHermesServiceUnavailable } from "@/lib/hermes-service";
 import {
@@ -13,10 +14,11 @@ import {
 } from "@/lib/hermes-task-actions";
 import { prisma } from "@/lib/prisma";
 
-type MirroredTask = { id: string; title: string; status: string };
+type MirroredTask = { id: string; board: string; title: string; status: string };
 type AgentRequestData = ReturnType<typeof buildHermesRequestData>;
 
 type TaskActionDependencies = {
+  primaryBoard?: string;
   findTask?: (id: string) => Promise<MirroredTask | null>;
   createAgentRequest?: (data: AgentRequestData) => Promise<unknown>;
 };
@@ -77,9 +79,12 @@ function parseBlockKind(value: unknown): { value: HermesBlockKind | null; error:
 function payloadForAction(
   action: HermesTaskAction,
   taskId: string,
+  board: string,
   body: Record<string, unknown>,
 ): { payload?: Record<string, string>; error?: string } {
-  const payload: Record<string, string> = { taskId };
+  // The board comes from the stored task row, never from the client; the
+  // bridge refuses to execute a request whose board is not its own.
+  const payload: Record<string, string> = { taskId, board };
 
   if (action === "complete") {
     const result = parseOptionalText(body.result, "result", 2_000);
@@ -130,14 +135,37 @@ export async function handleTaskActionRequest(
     return NextResponse.json({ error: "unsupported task action" }, { status: 400 });
   }
 
+  // Actions exist only for the primary board. A client-named board is only
+  // ever a reason to refuse, never a way to pick a different board.
+  const primaryBoard = dependencies.primaryBoard ?? resolvePrimaryBoard();
+  if (body.board !== undefined && body.board !== null && body.board !== "") {
+    const requested = typeof body.board === "string" ? body.board.trim().toLowerCase() : "";
+    if (!isBoardSlug(requested)) {
+      return NextResponse.json({ error: "invalid board" }, { status: 400 });
+    }
+    if (requested !== primaryBoard) {
+      return NextResponse.json(
+        { error: `actions are only available on the primary board (${primaryBoard}); ${requested} is read-only` },
+        { status: 409 },
+      );
+    }
+  }
+
   const findTask = dependencies.findTask ?? ((id: string) =>
     prisma.hermesTask.findUnique({
       where: { id },
-      select: { id: true, title: true, status: true },
+      select: { id: true, board: true, title: true, status: true },
     }));
   const task = await findTask(taskId);
   if (!task) {
     return NextResponse.json({ error: "task not found" }, { status: 404 });
+  }
+  // Task ids are only unique within a board: the stored row's board decides.
+  if (task.board !== primaryBoard) {
+    return NextResponse.json(
+      { error: `task ${task.id} is on board ${task.board}; actions are only available on the primary board (${primaryBoard})` },
+      { status: 409 },
+    );
   }
 
   if (!isTaskActionAllowed(task.status, action)) {
@@ -147,7 +175,7 @@ export async function handleTaskActionRequest(
     );
   }
 
-  const parsedPayload = payloadForAction(action, task.id, body);
+  const parsedPayload = payloadForAction(action, task.id, task.board, body);
   if (!parsedPayload.payload) {
     return NextResponse.json({ error: parsedPayload.error }, { status: 400 });
   }

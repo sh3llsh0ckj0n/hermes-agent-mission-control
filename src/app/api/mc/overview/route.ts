@@ -32,5 +32,5 @@ export async function GET() {
       },
       { headers: { "Cache-Control": "no-store" } },
     );
-  });
+  }, { route: "GET /api/mc/overview" });
 }

@@ -130,7 +130,7 @@ export async function handleTaskListRequest(req: Request, dependencies: TaskList
 }
 
 export async function GET(req: Request) {
-  return withMissionControl(() => handleTaskListRequest(req));
+  return withMissionControl(() => handleTaskListRequest(req), { route: "GET /api/hermes/tasks" });
 }
 
 export async function handleTaskCreateRequest(

@@ -17,5 +17,5 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       }),
     ]);
     return NextResponse.json({ project: summarizeProject(project), state: project.state, approvals, required });
-  });
+  }, { route: "GET /api/mc/projects/[id]" });
 }

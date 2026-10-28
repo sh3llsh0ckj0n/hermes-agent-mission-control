@@ -23,5 +23,5 @@ export async function GET(req: Request) {
       }),
     ]);
     return NextResponse.json({ ledger, required, orphanReceipts });
-  });
+  }, { route: "GET /api/mc/reconciliation" });
 }

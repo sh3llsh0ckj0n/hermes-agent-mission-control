@@ -19,5 +19,5 @@ export async function GET(req: Request) {
     const counts: Record<string, number> = {};
     for (const task of tasks) counts[task.classification] = (counts[task.classification] ?? 0) + 1;
     return NextResponse.json({ tasks, counts, total: tasks.length });
-  });
+  }, { route: "GET /api/mc/tasks" });
 }

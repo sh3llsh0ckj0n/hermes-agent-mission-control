@@ -14,5 +14,5 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       lastReconciledAt: project.lastReconciledAt?.toISOString() ?? null,
       milestones: projectMilestones(project),
     });
-  });
+  }, { route: "GET /api/mc/projects/[id]/milestones" });
 }

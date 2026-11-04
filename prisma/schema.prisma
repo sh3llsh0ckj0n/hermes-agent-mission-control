@@ -459,6 +459,9 @@ model AgentRequest {
   result        String?
   error         String?
   hermesTaskId  String?
+  // Audit + replay protection for POST /api/hermes/submit; null for dashboard requests.
+  submitter      String?            // e.g. "codex"
+  idempotencyKey String?  @unique   // "<submitter>:<client key>"
   decidedAt     DateTime?
   startedAt     DateTime?
   finishedAt    DateTime?
@@ -467,6 +470,7 @@ model AgentRequest {
 
   @@index([status])
   @@index([createdAt])
+  @@index([submitter, createdAt])
 }
 
 model AgentEvent {

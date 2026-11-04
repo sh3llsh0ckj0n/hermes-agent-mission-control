@@ -5,10 +5,11 @@ import {
   classifyRouteAccess,
   decideAuthentication,
   decideRouteAvailability,
+  isTicketSubmitTokenOutOfScope,
   type AuthenticationDecision,
   type RouteAccess,
 } from "@/lib/route-policy";
-import { hasValidInternalSecret } from "@/lib/security";
+import { hasValidInternalSecret, hasValidTicketSubmitToken } from "@/lib/security";
 
 function unavailableResponse(route: RouteAccess) {
   if (route.requestType === "api") {
@@ -28,6 +29,9 @@ function authenticationResponse(
   if (decision === "unauthorized") {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  if (decision === "forbidden") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   return NextResponse.redirect(new URL("/login", request.url));
 }
 
@@ -37,10 +41,32 @@ export async function proxy(request: NextRequest) {
     process.env.NEXT_PUBLIC_MODULE_OVERRIDES,
   );
 
+  // TICKET_SUBMIT_TOKEN is valid only on the submit route. It is checked
+  // before every other rule so it can never reach another handler, including
+  // system routes and the development bypass.
+  const hasTicketSubmitToken = hasValidTicketSubmitToken(request.headers);
+  if (isTicketSubmitTokenOutOfScope(route, hasTicketSubmitToken)) {
+    return authenticationResponse("forbidden", request);
+  }
+
   // Route availability is authoritative and is resolved before every auth bypass.
   const availability = decideRouteAvailability(route);
   if (availability === "allow") return NextResponse.next();
   if (availability === "not_found") return unavailableResponse(route);
+
+  // The submit route accepts only its own token: no development bypass, no
+  // internal secret, no session. The handler re-checks it as well.
+  if (route.auth === "ticket-submit") {
+    return authenticationResponse(
+      decideAuthentication(route, {
+        isDevelopment: false,
+        hasInternalSecret: false,
+        isAuthenticated: false,
+        hasTicketSubmitToken,
+      }),
+      request,
+    );
+  }
 
   if (process.env.NODE_ENV === "development") {
     return NextResponse.next();

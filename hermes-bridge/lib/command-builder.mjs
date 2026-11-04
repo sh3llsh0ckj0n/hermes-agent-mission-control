@@ -39,6 +39,57 @@ function optionalPositionalString(value, label, maxLength) {
   return normalized;
 }
 
+// Profiles an externally submitted ticket may be assigned to. Mirrors
+// TICKET_ASSIGNEES in src/lib/ticket-submit.ts; the bridge re-checks it so a
+// request edited after submission cannot name an arbitrary profile.
+export const KANBAN_CREATE_ASSIGNEES = Object.freeze([
+  "atlas",
+  "weaver",
+  "amber",
+  "claude",
+  "artemis",
+]);
+const KANBAN_CREATE_INITIAL_STATUSES = new Set(["blocked"]);
+
+/*
+ * Optional kanban.create payload (AgentRequest.prompt as a JSON object):
+ *   { board?, body?, assignee?, initialStatus? }
+ * Requests created in the dashboard have no prompt, and older requests may
+ * carry a plain-text prompt; both keep the original title-only behaviour.
+ */
+function parseKanbanCreatePayload(request) {
+  const prompt = typeof request?.prompt === "string" ? request.prompt.trim() : "";
+  if (!prompt.startsWith("{")) return {};
+  return parseRequestPayload(request);
+}
+
+function kanbanCreateOptions(payload, configuredBoard) {
+  if (payload.board !== undefined && payload.board !== null && payload.board !== configuredBoard) {
+    throw new ValidationError(
+      `Kanban request targets board ${String(payload.board).slice(0, 64)}; this bridge acts only on ${configuredBoard}`,
+    );
+  }
+  const options = [];
+  // `--opt=value` keeps a value that begins with "-" from being read as a flag.
+  const body = optionalString(payload.body, "Kanban body", 4_000);
+  if (body) options.push(`--body=${body}`);
+  const assignee = optionalString(payload.assignee, "Kanban assignee", 50);
+  if (assignee) {
+    if (!KANBAN_CREATE_ASSIGNEES.includes(assignee)) {
+      throw new ValidationError("Kanban assignee is not allowed");
+    }
+    options.push(`--assignee=${assignee}`);
+  }
+  const initialStatus = optionalString(payload.initialStatus, "Kanban initial status", 20);
+  if (initialStatus) {
+    if (!KANBAN_CREATE_INITIAL_STATUSES.has(initialStatus)) {
+      throw new ValidationError("Kanban initial status is not allowed");
+    }
+    options.push("--initial-status", initialStatus);
+  }
+  return options;
+}
+
 const BLOCK_KINDS = new Set([
   "capability",
   "dependency",
@@ -85,15 +136,20 @@ export function buildHermesCommand(request, { board = "default", runTimeoutMs = 
     };
   }
   if (policy.kind === "kanban" || policy.kind === "kanban.create") {
+    const configuredBoard = requiredString(board, "Hermes board", 200);
+    const createOptions = policy.kind === "kanban.create"
+      ? kanbanCreateOptions(parseKanbanCreatePayload(request), configuredBoard)
+      : [];
     return {
       args: [
         "kanban",
         "--board",
-        requiredString(board, "Hermes board", 200),
+        configuredBoard,
         "create",
         "--json",
         "--idempotency-key",
         requestIdempotencyKey(request?.id),
+        ...createOptions,
         title,
       ],
       timeoutMs: 20_000,

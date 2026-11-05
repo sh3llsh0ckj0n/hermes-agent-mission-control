@@ -1,7 +1,8 @@
 import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
-import { withHermesServiceUnavailable } from "@/lib/hermes-service";
+import { isHermesServiceUnavailableError, withHermesServiceUnavailable } from "@/lib/hermes-service";
+import { logMissionControlFailure } from "@/lib/mc-diagnostics";
 
 /*
  * Mission Control normalized state, read side.
@@ -156,14 +157,30 @@ export function missionControlSchemaPendingResponse() {
   );
 }
 
-/** Wrap a read so an unmigrated database answers 503 with a distinct code. */
-export async function withMissionControl<T extends Response>(handler: () => Promise<T>) {
+/**
+ * Wrap a read so an unmigrated database answers 503 with a distinct code.
+ * Other read failures return a sanitized 500. The category is taken from the
+ * Prisma error code only. This does not identify the cause of a past PalmOS 500.
+ */
+export async function withMissionControl<T extends Response>(
+  handler: () => Promise<T>,
+  context: { route: string } = { route: "mission-control" },
+) {
   return withHermesServiceUnavailable(async () => {
     try {
       return await handler();
     } catch (error) {
       if (isMissionControlSchemaPending(error)) return missionControlSchemaPendingResponse();
-      throw error;
+      const classified = logMissionControlFailure(context.route, error);
+      if (isHermesServiceUnavailableError(error)) throw error;
+      return NextResponse.json(
+        {
+          code: "MC_READ_FAILED",
+          category: classified.category,
+          error: "Mission Control read failed",
+        },
+        { status: 500, headers: { "Cache-Control": "no-store" } },
+      );
     }
   });
 }

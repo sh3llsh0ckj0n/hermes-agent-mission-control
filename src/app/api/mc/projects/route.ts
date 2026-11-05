@@ -8,5 +8,5 @@ export async function GET() {
     const projects = await prisma.mcProject.findMany({ orderBy: { id: "asc" } });
     const now = Date.now();
     return NextResponse.json({ projects: projects.map((project) => summarizeProject(project, now)) });
-  });
+  }, { route: "GET /api/mc/projects" });
 }

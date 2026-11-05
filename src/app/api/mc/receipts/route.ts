@@ -10,7 +10,22 @@ export async function GET(req: Request) {
       where: validProjectId(project) ? { projectId: project } : {},
       orderBy: [{ finishedAt: "desc" }, { id: "asc" }],
       take: 500,
+      select: {
+        id: true,
+        projectId: true,
+        label: true,
+        kind: true,
+        result: true,
+        rawResult: true,
+        qcVerdict: true,
+        finishedAt: true,
+        actionRequired: true,
+        integrity: true,
+        identity: true,
+        firstSeenAt: true,
+        lastSeenAt: true,
+      },
     });
     return NextResponse.json({ receipts });
-  });
+  }, { route: "GET /api/mc/receipts" });
 }

@@ -17,5 +17,5 @@ export async function GET(req: Request) {
       orderBy: [{ projectId: "asc" }, { id: "asc" }],
     });
     return NextResponse.json({ approvals });
-  });
+  }, { route: "GET /api/mc/approvals" });
 }

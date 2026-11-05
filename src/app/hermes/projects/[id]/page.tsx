@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { Eyebrow, Panel, Pill, SectionHeader } from "@/components/ui/kit";
@@ -141,7 +142,15 @@ export default async function MissionProjectPage({ params }: { params: Promise<{
       </Panel>
 
       <Panel className="p-5">
-        <Eyebrow>Approvals</Eyebrow>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <Eyebrow>Approvals</Eyebrow>
+          <Link href="/hermes/approvals" className="text-[13px] text-[var(--text-2)] underline-offset-2 hover:underline">
+            Read-only package view
+          </Link>
+        </div>
+        <p className="mt-2 text-[12px] leading-5 text-[var(--text-3)]">
+          These pills repeat the mirrored status. Package validity is on the package view and requires a fresh hash match.
+        </p>
         <ul className="mt-3 divide-y divide-[var(--border)] text-[13px]">
           {data.approvals.map((approval) => (
             <li key={approval.id} className="flex items-center justify-between gap-4 py-2">
